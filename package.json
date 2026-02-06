@@ -1,7 +1,23 @@
 {
-  "name": "strapi-plugin-presence",
+  "name": "@thinhnd028/strapi-plugin-presence",
   "version": "0.0.1",
   "description": "Real-time presence for Strapi 5 Admin Panel",
+  "author": "Tai Nguyen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thinhnd028/strapi-plugin-presence.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "files": [
+    "dist/",
+    "package.json",
+    "README.md",
+    "strapi-admin.ts",
+    "strapi-server.ts"
+  ],
   "strapi": {
     "kind": "plugin",
     "name": "presence",
@@ -13,16 +29,16 @@
     "socket.io-client": "^4.7.2"
   },
   "devDependencies": {
-    "@strapi/sdk-plugin": "^5.2.0"
+    "@strapi/sdk-plugin": "^5.2.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0"
   },
   "peerDependencies": {
     "@strapi/strapi": "^5.0.0",
-    "@strapi/design-system": "^2.0.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0",
-    "react-router-dom": "^6.0.0",
-    "socket.io": "^4.7.2",
-    "socket.io-client": "^4.7.2"
+    "react": "^17.0.0 || ^18.0.0",
+    "react-dom": "^17.0.0 || ^18.0.0",
+    "react-router-dom": "^6.0.0"
   },
   "scripts": {
     "build": "strapi-plugin build",
