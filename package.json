@@ -1,6 +1,6 @@
 {
   "name": "@thinhnd028/strapi-plugin-presence",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Real-time presence for Strapi 5 Admin Panel",
   "author": "Tai Nguyen",
   "license": "MIT",

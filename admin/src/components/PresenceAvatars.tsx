@@ -3,6 +3,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 // @ts-ignore
 import { io } from 'socket.io-client';
+import { useFetchClient, useAuth } from '@strapi/strapi/admin';
 
 const avatarColors = [
     '#4945ff', // Strapi Purple
@@ -17,50 +18,41 @@ const avatarColors = [
 const PresenceAvatars = () => {
     const params = useParams<any>();
     const entryId = params.id || params.documentId || params.slug;
+    const { get } = useFetchClient();
+    const { token } = useAuth('PresenceAvatars', (auth) => auth);
 
     const [allUsers, setAllUsers] = useState<any[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
-        const getCookie = (name: string) => {
-            const value = `; ${document.cookie}`;
-            const parts = value.split(`; ${name}=`);
-            if (parts.length === 2) return parts.pop()?.split(';').shift();
-            return null;
-        };
-
         const fetchMe = async () => {
             try {
-                const token = getCookie('jwtToken') || localStorage.getItem('jwtToken');
-                const response = await fetch(`${window.location.origin}/admin/users/me`, {
-                    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                const { data: resData } = await get('/admin/users/me');
+                setCurrentUser({
+                    id: resData.data.id || Math.random(),
+                    username: resData.data.firstname || resData.data.username || 'Admin',
+                    initials: (resData.data.firstname?.[0] || 'A').toUpperCase()
                 });
-
-                if (response.ok) {
-                    const resData = await response.json();
-                    setCurrentUser({
-                        id: resData.data.id || Math.random(),
-                        username: resData.data.firstname || resData.data.username || 'Admin',
-                        initials: (resData.data.firstname?.[0] || 'A').toUpperCase()
-                    });
-                } else {
-                    setCurrentUser({
-                        id: 'anon-' + Math.random().toString(36).substring(2, 7),
-                        username: 'Someone',
-                        initials: '?'
-                    });
-                }
-            } catch (err) { }
+            } catch (err) {
+                setCurrentUser({
+                    id: 'anon-' + Math.random().toString(36).substring(2, 7),
+                    username: 'Someone',
+                    initials: '?'
+                });
+            }
         };
         fetchMe();
-    }, []);
+    }, [get]);
 
     const socket = useMemo(() => {
         try {
-            return io(window.location.origin, { transports: ['websocket', 'polling'] });
+            return io(window.location.origin, {
+                transports: ['websocket', 'polling'],
+                auth: token ? { token } : undefined,
+            });
         } catch { return null; }
-    }, []);
+    }, [token]);
 
     useEffect(() => {
         if (!socket || !entryId || !currentUser) return;
