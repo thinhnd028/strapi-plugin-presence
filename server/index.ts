@@ -1,21 +1,18 @@
+import { Server } from "socket.io";
+
 export default {
     register(/*{ strapi }*/) { },
 
     async bootstrap({ strapi }: { strapi: any }) {
-        // We use require to avoid issues if socket.io is not yet fully linked in TS paths
-        let Server;
-        try {
-            Server = require('socket.io').Server;
-        } catch (err) {
-            console.error('Socket.io not found. Please run "npm install socket.io" in the backend directory.');
-            return;
-        }
-
         const io = new Server(strapi.server.httpServer, {
             cors: {
                 origin: "*", // In production, restrict this to your admin URL
                 methods: ["GET", "POST"]
-            }
+            },
+            // Allow WebSocket connections both directly and behind a reverse proxy.
+            // The client will send the full path (e.g. /cms/socket.io/) and the proxy
+            // strips the prefix, so Strapi always sees /socket.io/.
+            allowEIO3: true,
         });
 
         const activeUsers = new Map(); // key: socketId, value: { userId, entryId, username, avatar }
