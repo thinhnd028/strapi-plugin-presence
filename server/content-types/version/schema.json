@@ -1,0 +1,48 @@
+{
+    "kind": "collectionType",
+    "collectionName": "publish_history_versions",
+    "info": {
+        "singularName": "version",
+        "pluralName": "versions",
+        "displayName": "Version",
+        "description": "Snapshots of document changes (draft and published)"
+    },
+    "options": {
+        "draftAndPublish": false
+    },
+    "pluginOptions": {
+        "content-manager": {
+            "visible": false
+        },
+        "content-type-builder": {
+            "visible": false
+        }
+    },
+    "attributes": {
+        "relatedDocumentId": {
+            "type": "string",
+            "required": true
+        },
+        "contentType": {
+            "type": "string",
+            "required": true
+        },
+        "snapshot": {
+            "type": "json",
+            "required": true
+        },
+        "action": {
+            "type": "enumeration",
+            "enum": ["draft", "published"],
+            "default": "published",
+            "required": true
+        },
+        "publishedAt": {
+            "type": "datetime",
+            "required": true
+        },
+        "author": {
+            "type": "json"
+        }
+    }
+}

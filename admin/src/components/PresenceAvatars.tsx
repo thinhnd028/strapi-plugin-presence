@@ -1,41 +1,34 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 // @ts-ignore
-import { useParams } from 'react-router-dom';
+import { useParams, useLocation } from 'react-router-dom';
 // @ts-ignore
-import { io } from 'socket.io-client';
+import { io, Socket } from 'socket.io-client';
 
 const avatarColors = [
-    '#4945ff', // Strapi Purple
-    '#32d08d', // Green
-    '#ff5d5d', // Red
-    '#ffb54d', // Orange
-    '#a155ff', // Violet
-    '#211fad', // Dark Blue
-    '#007bff'  // Sky Blue
+    '#4945ff', '#32d08d', '#ff5d5d', '#ffb54d',
+    '#a155ff', '#211fad', '#007bff',
 ];
 
-/**
- * Detect the base path of the Strapi admin panel from the current URL.
- * e.g. '/cms/admin/content-manager/...' → '/cms'
- *      '/admin/content-manager/...' → ''
- */
 const getStrapiBasePath = (): string => {
     const path = window.location.pathname;
     const adminIndex = path.indexOf('/admin');
-    if (adminIndex > 0) {
-        return path.substring(0, adminIndex); // e.g. '/cms'
-    }
-    return ''; // no base path (local dev)
+    return adminIndex > 0 ? path.substring(0, adminIndex) : '';
 };
 
 const PresenceAvatars = () => {
     const params = useParams<any>();
-    const entryId = params.id || params.documentId || params.slug;
+    const location = useLocation();
+    const entryId = params.id || params.documentId || params.slug || (location?.pathname || "");
 
     const [allUsers, setAllUsers] = useState<any[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
     const [isConnected, setIsConnected] = useState(false);
+    const [typingUsers, setTypingUsers] = useState<any[]>([]);
+    const socketRef = useRef<any>(null);
+    const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const prevEntryIdRef = useRef<string | null>(null);
 
+    // ---- Fetch current admin user (once) ----
     useEffect(() => {
         const getCookie = (name: string) => {
             const value = `; ${document.cookie}`;
@@ -51,7 +44,6 @@ const PresenceAvatars = () => {
                 const response = await fetch(`${window.location.origin}${basePath}/admin/users/me`, {
                     headers: token ? { 'Authorization': `Bearer ${token}` } : {}
                 });
-
                 if (response.ok) {
                     const resData = await response.json();
                     setCurrentUser({
@@ -66,47 +58,128 @@ const PresenceAvatars = () => {
                         initials: '?'
                     });
                 }
-            } catch (err) { }
+            } catch (err) {
+                console.warn('[Presence] Failed to fetch user', err);
+            }
         };
         fetchMe();
     }, []);
 
-    const socket = useMemo(() => {
-        try {
-            const basePath = getStrapiBasePath();
-            return io(window.location.origin, {
-                path: `${basePath}/socket.io/`,
-                transports: ['websocket', 'polling'],
-            });
-        } catch { return null; }
-    }, []);
-
+    // ---- Create & manage socket lifecycle ----
     useEffect(() => {
-        if (!socket || !entryId || !currentUser) return;
+        if (!entryId || !currentUser) return;
+
+        // Create socket if not exists or disconnected
+        if (!socketRef.current || socketRef.current.disconnected) {
+            try {
+                const basePath = getStrapiBasePath();
+                socketRef.current = io(window.location.origin, {
+                    path: `${basePath}/socket.io/`,
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionAttempts: 10,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                });
+            } catch {
+                return;
+            }
+        }
+
+        const socket = socketRef.current;
+
+        // Leave previous room if entryId changed
+        const prevEntryId = prevEntryIdRef.current;
+        if (prevEntryId && prevEntryId !== entryId) {
+            socket.emit('leave-entry', { entryId: prevEntryId });
+            setAllUsers([]); setTypingUsers([]);
+        }
+        prevEntryIdRef.current = entryId;
+
+        // Join the new room
+        const joinRoom = () => {
+            socket.emit('join-entry', { entryId, user: currentUser });
+            setIsConnected(true);
+        };
 
         const onConnect = () => {
             setIsConnected(true);
-            socket.emit('join-entry', { entryId, user: currentUser });
+            joinRoom();
         };
+
+        const onReconnect = () => {
+            // Re-join current room after reconnection
+            joinRoom();
+        };
+
         const onUpdate = (users: any[]) => {
-            const uniqueUsers = Array.from(new Map((users || []).map(u => [u.id, u])).values());
+            const raw = users || [];
+            const uniqueUsers = Array.from(
+                new Map(raw.map((u: any) => [u.id, u])).values()
+            );
             setAllUsers(uniqueUsers);
         };
-        const onDisconnect = () => setIsConnected(false);
+
+        const onDisconnect = () => {
+            setIsConnected(false);
+        };
 
         socket.on('connect', onConnect);
+        socket.on('reconnect', onReconnect);
         socket.on('presence-update', onUpdate);
+        socket.on('typing-update', (users: any[]) => setTypingUsers(users || []));
         socket.on('disconnect', onDisconnect);
 
-        if (socket.connected) onConnect();
+        // If already connected, join immediately
+        if (socket.connected) {
+            joinRoom();
+        }
 
         return () => {
             socket.off('connect', onConnect);
+            socket.off('reconnect', onReconnect);
             socket.off('presence-update', onUpdate);
+            socket.off('typing-update');
             socket.off('disconnect', onDisconnect);
-            socket.disconnect();
+
+            // Leave current room but DON'T disconnect socket
+            if (entryId) {
+                socket.emit('leave-entry', { entryId });
+            }
         };
-    }, [entryId, currentUser, socket]);
+    }, [entryId, currentUser]);
+
+    // ---- Emit typing to socket so others in room see it ----
+    useEffect(() => {
+        if (!entryId || !currentUser || !socketRef.current) return;
+        const socket = socketRef.current;
+        const emitTyping = () => {
+            socket.emit('user-typing', { entryId, userId: currentUser.id, username: currentUser.username });
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            typingTimeoutRef.current = setTimeout(() => {
+                socket.emit('user-stop-typing', { entryId });
+                typingTimeoutRef.current = null;
+            }, 1500);
+        };
+        document.addEventListener('input', emitTyping);
+        document.addEventListener('keydown', emitTyping);
+        return () => {
+            document.removeEventListener('input', emitTyping);
+            document.removeEventListener('keydown', emitTyping);
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            socket.emit('user-stop-typing', { entryId });
+        };
+    }, [entryId, currentUser]);
+
+    // ---- Disconnect socket only on full unmount ----
+    useEffect(() => {
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+                socketRef.current = null;
+            }
+        };
+    }, []);
 
     if (!entryId) return null;
 
@@ -129,14 +202,11 @@ const PresenceAvatars = () => {
                     display: flex;
                     flex-direction: column;
                     align-items: flex-start;
-                    justify-content: flex-start;
-                    text-align: left;
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                 }
                 .presence-header {
                     display: flex;
                     align-items: center;
-                    justify-content: flex-start;
                     gap: 6px;
                     margin-bottom: 10px;
                     width: 100%;
@@ -153,12 +223,12 @@ const PresenceAvatars = () => {
                     width: 7px;
                     height: 7px;
                     border-radius: 50%;
-                    background: #32d08d;
-                    box-shadow: 0 0 8px rgba(50, 208, 141, 0.4);
+                    position: relative;
                 }
                 .presence-status-dot.active::after {
                     content: '';
                     position: absolute;
+                    top: 0; left: 0;
                     width: 7px;
                     height: 7px;
                     background: inherit;
@@ -173,7 +243,6 @@ const PresenceAvatars = () => {
                     display: flex;
                     flex-wrap: wrap;
                     gap: 6px;
-                    justify-content: flex-start;
                     align-items: center;
                     width: 100%;
                 }
@@ -217,30 +286,44 @@ const PresenceAvatars = () => {
                     visibility: visible;
                     transform: translateX(-50%) translateY(-8px);
                 }
-                .presence-me-badge {
-                    position: absolute;
-                    bottom: -1px;
-                    right: -1px;
-                    width: 9px;
-                    height: 9px;
+                .presence-avatar-item.is-me {
+                    filter: drop-shadow(0 0 3px rgba(73,69,255,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.08));
+                }
+                .presence-typing-dots {
                     background: white;
-                    border-radius: 50%;
+                    border-radius: 4px;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+                    position: absolute;
+                    bottom: -2px;
+                    right: -2px;
+                    min-width: 18px;
+                    height: 10px;
                     display: flex;
+                    gap: 2px;
                     align-items: center;
                     justify-content: center;
-                    border: 1.5px solid #4945ff;
                 }
-                .presence-me-inner {
-                    width: 3px;
-                    height: 3px;
-                    background: #4945ff;
-                    border-radius: 50%;
+                .presence-typing-dots span {
+                    width: 2.5px;
+                    height: 2.5px;
+                    border-radius: 100%;
+                    background: #d63939;
+                    animation: presence-typing-bounce 1.4s ease-in-out infinite both;
+                }
+                .presence-typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+                .presence-typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+                @keyframes presence-typing-bounce {
+                    0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+                    40% { transform: scale(1); opacity: 1; }
                 }
             `}</style>
 
             <div className="presence-header">
                 <span className="presence-title">Live Editing</span>
-                <div className={`presence-status-dot ${isConnected ? 'active' : ''}`} style={{ background: isConnected ? '#32d08d' : '#f5c0b8' }} />
+                <div
+                    className={`presence-status-dot ${isConnected ? 'active' : ''}`}
+                    style={{ background: isConnected ? '#32d08d' : '#f5c0b8' }}
+                />
             </div>
 
             <div className="presence-avatar-list">
@@ -252,13 +335,13 @@ const PresenceAvatars = () => {
                         return (
                             <div
                                 key={`${u.id}-${idx}`}
-                                className="presence-avatar-item"
-                                style={{ background: isMe ? '#4945ff' : getColor(u.id) }}
+                                className={`presence-avatar-item${isMe ? ' is-me' : ''}`}
+                                style={{ background: isMe ? '#4945ff' : (u.color || getColor(u.id)) }}
                             >
                                 {u.initials}
-                                {isMe && (
-                                    <div className="presence-me-badge">
-                                        <div className="presence-me-inner" />
+                                {idx === allUsers.length - 1 && isConnected && typingUsers.length > 0 && (
+                                    <div className="presence-typing-dots">
+                                        <span /><span /><span />
                                     </div>
                                 )}
                                 <div className="presence-tooltip">

@@ -1,6 +1,6 @@
 {
   "name": "@thinhnd028/strapi-plugin-presence",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Real-time presence for Strapi 5 Admin Panel",
   "author": "Tai Nguyen",
   "license": "MIT",
@@ -26,6 +26,8 @@
     "description": "Real-time presence for Strapi 5 Admin Panel"
   },
   "dependencies": {
+    "@strapi/design-system": "^2.1.2",
+    "@strapi/icons": "^2.1.2",
     "socket.io": "^4.7.2",
     "socket.io-client": "^4.7.2"
   },
@@ -42,7 +44,7 @@
     "react-router-dom": "^6.0.0"
   },
   "scripts": {
-    "build": "strapi-plugin build",
+    "build": "strapi-plugin build && tsc -p admin/tsconfig.build.json && tsc -p server/tsconfig.build.json",
     "watch": "strapi-plugin watch",
     "verify": "strapi-plugin verify"
   },
@@ -58,7 +60,7 @@
     },
     "./strapi-server": {
       "types": "./dist/server/src/index.d.ts",
-      "source": "./server/index.ts",
+      "source": "./server/src/index.ts",
       "import": "./dist/server/index.mjs",
       "require": "./dist/server/index.js",
       "default": "./dist/server/index.js"

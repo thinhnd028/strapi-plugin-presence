@@ -1,0 +1,79 @@
+{
+  "kind": "collectionType",
+  "collectionName": "action_histories",
+  "info": {
+    "singularName": "action-history",
+    "pluralName": "action-histories",
+    "displayName": "Action History",
+    "description": "Audit log of user write actions on content"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {
+"content-manager": {
+            "visible": false
+        },
+    "content-type-builder": {
+      "visible": false
+    }
+  },
+  "attributes": {
+    "action": {
+      "type": "enumeration",
+      "enum": [
+        "create",
+        "update",
+        "publish",
+        "unpublish",
+        "delete",
+        "discardDraft",
+        "login",
+        "logout"
+      ],
+      "required": true
+    },
+    "contentType": {
+      "type": "string",
+      "required": true
+    },
+    "targetDocumentId": {
+      "type": "string"
+    },
+    "entryId": {
+      "type": "string"
+    },
+    "user": {
+      "type": "json",
+      "description": "User who performed the action (admin or API user)"
+    },
+    "beforeData": {
+      "type": "json",
+      "description": "Data before change (for update/delete)"
+    },
+    "afterData": {
+      "type": "json",
+      "description": "Data after change (for create/update)"
+    },
+    "filters": {
+      "type": "json",
+      "description": "Query filters (for find)"
+    },
+    "resultCount": {
+      "type": "integer",
+      "description": "Number of results (for find)"
+    },
+    "source": {
+      "type": "enumeration",
+      "enum": [
+        "admin",
+        "api"
+      ],
+      "default": "admin"
+    },
+    "versionDocumentId": {
+      "type": "string",
+      "description": "Document ID of linked version snapshot (update/publish)"
+    }
+  }
+}
