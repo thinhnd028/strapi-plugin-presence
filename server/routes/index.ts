@@ -1,6 +1,14 @@
 export default [
   {
     method: 'GET',
+    path: '/active-users',
+    handler: 'active-users-controller.getCount',
+    config: {
+      policies: ['admin::isAuthenticatedAdmin', 'plugin::presence.has-access-active-users'],
+    },
+  },
+  {
+    method: 'GET',
     path: '/action-history',
     handler: 'action-history-controller.find',
     config: { policies: [], auth: false },

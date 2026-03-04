@@ -17,6 +17,7 @@ import contentTypes from "./content-types";
 import services from "./services";
 import config from "./config";
 import hasRestorePermission from "./policies/has-restore-permission";
+import hasAccessActiveUsers from "./policies/has-access-active-users";
 
 export default {
   config,
@@ -27,6 +28,12 @@ export default {
 
   async bootstrap({ strapi }: { strapi: any }) {
     const actions = [
+      {
+        section: 'plugins',
+        displayName: 'View active users count',
+        uid: 'access-active-users',
+        pluginName: 'presence',
+      },
       {
         section: 'plugins',
         displayName: 'Version history',
@@ -129,7 +136,8 @@ export default {
     });
 
     strapi.io = io;
-      strapi.log.info('[Presence] Socket.io attached successfully');
+    strapi.presenceActiveUsers = activeUsers;
+    strapi.log.info('[Presence] Socket.io attached successfully');
     });
 
     scheduleRetention(strapi);
@@ -141,5 +149,6 @@ export default {
   services,
   policies: {
     'has-restore-permission': hasRestorePermission,
+    'has-access-active-users': hasAccessActiveUsers,
   },
 };

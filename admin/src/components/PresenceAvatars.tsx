@@ -37,24 +37,44 @@ const PresenceAvatars = () => {
             return null;
         };
 
+        const getDisplayName = (data: Record<string, unknown> | null): string => {
+            if (!data) return 'Admin';
+            const first = (data.firstname as string) || '';
+            const last = (data.lastname as string) || '';
+            const name = (first + (last ? ` ${last}` : '')).trim();
+            return name || (data.username as string) || (data.email as string) || 'Admin';
+        };
+
+        const getInitials = (data: Record<string, unknown> | null): string => {
+            if (!data) return 'A';
+            const first = (data.firstname as string) || '';
+            const last = (data.lastname as string) || '';
+            if (first) return (first[0] + (last ? last[0] : '')).toUpperCase().slice(0, 2);
+            const u = (data.username as string) || (data.email as string) || '';
+            return (u[0] || 'A').toUpperCase();
+        };
+
         const fetchMe = async () => {
             try {
                 const basePath = getStrapiBasePath();
-                const token = getCookie('jwtToken') || localStorage.getItem('jwtToken');
+                const token = getCookie('jwtToken') || getCookie('token') || localStorage.getItem('jwtToken') || localStorage.getItem('token');
                 const response = await fetch(`${window.location.origin}${basePath}/admin/users/me`, {
-                    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+                    credentials: 'include',
                 });
-                if (response.ok) {
-                    const resData = await response.json();
+                const resData = await response.json().catch(() => ({}));
+                const data = (resData?.data ?? resData) as Record<string, unknown> | null;
+
+                if (response.ok && data?.id) {
                     setCurrentUser({
-                        id: resData.data.id || Math.random(),
-                        username: resData.data.firstname || resData.data.username || 'Admin',
-                        initials: (resData.data.firstname?.[0] || 'A').toUpperCase()
+                        id: (data.id as number) || Math.random(),
+                        username: getDisplayName(data),
+                        initials: getInitials(data)
                     });
                 } else {
                     setCurrentUser({
                         id: 'anon-' + Math.random().toString(36).substring(2, 7),
-                        username: 'Someone',
+                        username: 'Unknown',
                         initials: '?'
                     });
                 }

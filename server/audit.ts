@@ -16,7 +16,7 @@ const TRACKED_ACTIONS = new Set([
 
 /** Media, Users, Roles, Content (api::*) */
 const TRACKED_UID_PREFIXES = ['api::'];
-  /** Media, Users, Roles tracked via db.lifecycles only */
+/** Media, Users, Roles tracked via db.lifecycles only */
 
 /** Lấy thư mục components từ Strapi – dùng API chính thức, hoạt động cả dev/prod */
 function getComponentsDir(strapi: any): string | null {
@@ -84,15 +84,15 @@ function getSchema(strapi: any, uid: string): any {
     try {
       const m = strapi.getModel?.(u);
       if (m?.attributes) return m;
-    } catch {}
+    } catch { }
     try {
       const ct = strapi.contentType?.(u);
       if (ct?.attributes) return ct;
-    } catch {}
+    } catch { }
     try {
       const comp = strapi.components?.[u];
       if (comp?.attributes) return comp;
-    } catch {}
+    } catch { }
   }
   if (!uid.includes('::') && uid.includes('.')) {
     const parts = uid.split('.');
@@ -109,7 +109,7 @@ function getSchema(strapi: any, uid: string): any {
             if (schema?.attributes) return schema as any;
           }
         }
-      } catch {}
+      } catch { }
     }
   }
   return null;
@@ -285,9 +285,9 @@ export function registerActionHistory(strapi: any) {
 
   strapi.db.lifecycles.subscribe({
     models: ['plugin::upload.file', 'admin::user', 'admin::role', 'plugin::users-permissions.user', 'plugin::users-permissions.role'],
-    async afterCreate(e) { logFromLifecycle(strapi, 'create', (e.model && e.model.uid) || 'unknown', e.result); },
-    async afterUpdate(e) { logFromLifecycle(strapi, 'update', (e.model && e.model.uid) || 'unknown', e.result); },
-    async beforeDelete(e) {
+    async afterCreate(e: any) { logFromLifecycle(strapi, 'create', (e.model && e.model.uid) || 'unknown', e.result); },
+    async afterUpdate(e: any) { logFromLifecycle(strapi, 'update', (e.model && e.model.uid) || 'unknown', e.result); },
+    async beforeDelete(e: any) {
       const uid = (e.model && e.model.uid) || 'unknown';
       let beforeData: any = null;
       if (shouldSnapshot(strapi, uid)) {
@@ -299,7 +299,7 @@ export function registerActionHistory(strapi: any) {
       }
       await logFromLifecycle(strapi, 'delete', uid, e.params, beforeData);
     },
-    async beforeDeleteMany(e) {
+    async beforeDeleteMany(e: any) {
       const uid = (e.model && e.model.uid) || 'unknown';
       let beforeData: any = null;
       if (shouldSnapshot(strapi, uid)) {
@@ -314,8 +314,8 @@ export function registerActionHistory(strapi: any) {
       await logFromLifecycle(strapi, 'delete', uid, e.params, beforeData);
     },
   });
-  strapi.log.info('[Presence] Action (payload) + Version (full snapshot in background)');
-  strapi.log.info('[Presence] Lifecycles: Media, Users, Roles');
+  // strapi.log.info('[Presence] Action (payload) + Version (full snapshot in background)');
+  // strapi.log.info('[Presence] Lifecycles: Media, Users, Roles');
 }
 
 /** Log action from db lifecycle (Media, Users, Roles - models that may use db directly) */

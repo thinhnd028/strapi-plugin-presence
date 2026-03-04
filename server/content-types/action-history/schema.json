@@ -29,7 +29,8 @@
         "delete",
         "discardDraft",
         "login",
-        "logout"
+        "logout",
+        "email-send"
       ],
       "required": true
     },

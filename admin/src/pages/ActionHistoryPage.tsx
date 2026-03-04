@@ -72,6 +72,7 @@ const ActionHistoryPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [data, setData] = useState<Record<string, unknown>[]>([]);
+  const [activeUsersCount, setActiveUsersCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageCount, setPageCount] = useState(1);
   const [total, setTotal] = useState(0);
@@ -153,6 +154,31 @@ const ActionHistoryPage = () => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // Fetch active users count (chỉ superadmin có quyền)
+  useEffect(() => {
+    let cancelled = false;
+    const fetchActiveUsers = async () => {
+      try {
+        const base = getStrapiBasePath();
+        const res = await fetch(`${window.location.origin}${base}/presence/active-users`, {
+          credentials: 'include',
+        });
+        if (res.ok && !cancelled) {
+          const json = (await res.json()) as { uniqueCount?: number; count?: number };
+          setActiveUsersCount(json.uniqueCount ?? json.count ?? 0);
+        }
+      } catch {
+        if (!cancelled) setActiveUsersCount(null);
+      }
+    };
+    fetchActiveUsers();
+    const interval = setInterval(fetchActiveUsers, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   const reset = useCallback(() => {
     setActionF(''); setCtF(''); setSrcF(''); setSearch('');
     updateUrl({ action: '', contentType: '', source: '', search: '', page: 1 });
@@ -170,14 +196,33 @@ const ActionHistoryPage = () => {
     <Main labelledBy="action-history-title" aria-busy={loading}>
       <Box paddingLeft={10} paddingRight={10} paddingTop={6} paddingBottom={6} background="neutral100">
         <Box paddingBottom={6}>
-          <Typography id="action-history-title" variant="alpha" tag="h1" fontWeight="bold">
-            Action History
-          </Typography>
-          <Box paddingTop={2}>
-            <Typography variant="epsilon" textColor="neutral600">
-              Audit log of content changes. Links to version snapshots when available.
-            </Typography>
-          </Box>
+          <Flex justifyContent="space-between" alignItems="flex-start" wrap="wrap" gap={4}>
+            <Box>
+              <Typography id="action-history-title" variant="alpha" tag="h1" fontWeight="bold">
+                Action History
+              </Typography>
+              <Box paddingTop={2}>
+                <Typography variant="epsilon" textColor="neutral600">
+                  Audit log of content changes. Links to version snapshots when available.
+                </Typography>
+              </Box>
+            </Box>
+            {activeUsersCount !== null && (
+              <Box
+                background="primary100"
+                padding={3}
+                hasRadius
+                style={{ minWidth: 140 }}
+              >
+                <Typography variant="sigma" textColor="primary600">
+                  Users online
+                </Typography>
+                <Typography variant="alpha" fontWeight="bold" textColor="primary700">
+                  {activeUsersCount}
+                </Typography>
+              </Box>
+            )}
+          </Flex>
         </Box>
 
         <Box paddingBottom={4}>
