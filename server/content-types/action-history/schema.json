@@ -72,9 +72,35 @@
       ],
       "default": "admin"
     },
+    "status": {
+      "type": "enumeration",
+      "enum": ["draft", "published"],
+      "description": "Draft vs published context of the action"
+    },
+    "locale": {
+      "type": "string",
+      "description": "Locale of the target document (vi, en, ...)"
+    },
+    "ip": {
+      "type": "string",
+      "description": "Client IP address"
+    },
+    "userAgent": {
+      "type": "text",
+      "description": "Client user-agent string"
+    },
     "versionDocumentId": {
       "type": "string",
       "description": "Document ID of linked version snapshot (update/publish)"
+    },
+    "hasChanges": {
+      "type": "boolean",
+      "default": true,
+      "description": "False if the action was a no-op (payload matched existing state)"
+    },
+    "changedFields": {
+      "type": "json",
+      "description": "List of top-level field names that actually changed"
     }
   }
 }

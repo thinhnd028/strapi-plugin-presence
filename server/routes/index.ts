@@ -3,9 +3,7 @@ export default [
     method: 'GET',
     path: '/active-users',
     handler: 'active-users-controller.getCount',
-    config: {
-      policies: ['admin::isAuthenticatedAdmin', 'plugin::presence.has-access-active-users'],
-    },
+    config: { policies: [], auth: false },
   },
   {
     method: 'GET',

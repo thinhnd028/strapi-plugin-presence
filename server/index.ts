@@ -1,4 +1,5 @@
-import { Server } from "socket.io";
+import { WebSocketServer } from 'ws';
+import type { WebSocket } from 'ws';
 import { registerActionHistory } from "./audit";
 import { registerAuthAudit } from "./audit-auth";
 
@@ -62,82 +63,198 @@ export default {
     process.nextTick(() => {
       const httpServer = strapi.server?.httpServer;
       if (!httpServer) {
-        strapi.log.warn('[Presence] strapi.server.httpServer not available - Socket.io disabled');
+        strapi.log.warn('[Presence] strapi.server.httpServer not available - WebSocket disabled');
         return;
       }
-      const io = new Server(httpServer, {
-        cors: { origin: "*", methods: ["GET", "POST"] },
-        allowEIO3: true,
-        pingInterval: 10000,
-        pingTimeout: 5000,
-        path: "/socket.io",
-      });
 
-    const AVATAR_COLORS = ['#4945ff', '#32d08d', '#ff5d5d', '#ffb54d', '#a155ff', '#211fad', '#007bff'];
-    const getColorForUser = (id: any) => { const s = String(id); let h = 0; for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h); return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length]; };
-    const activeUsers = new Map();
-    const typingUsers = new Map<string, Map<string, { userId: string; username: string }>>();
+      const wss = new WebSocketServer({ server: httpServer, path: '/ws/presence' });
 
-    const broadcastRoom = (entryId: string) => {
-      const usersInRoom = Array.from(activeUsers.values()).filter((u: any) => u.entryId === entryId);
-      io.to(`entry-${entryId}`).emit('presence-update', usersInRoom);
-    };
+      const AVATAR_COLORS = ['#4945ff', '#32d08d', '#ff5d5d', '#ffb54d', '#a155ff', '#211fad', '#007bff'];
+      const getColorForUser = (id: any) => {
+        const s = String(id);
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h);
+        return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+      };
 
-    const broadcastTyping = (entryId: string) => {
-      const set = typingUsers.get(entryId);
-      const list = set ? Array.from(set.values()) : [];
-      io.to(`entry-${entryId}`).emit('typing-update', list);
-    };
+      // socketId → user info (exposed for active-users-controller)
+      const activeUsers = new Map<string, any>();
+      // ws → { entryId, socketId, user }
+      const socketState = new Map<WebSocket, { entryId: string; socketId: string; user: any }>();
+      // entryId → Set<WebSocket>
+      const rooms = new Map<string, Set<WebSocket>>();
+      // entryId → Map<WebSocket, { userId, username }>
+      const typingUsers = new Map<string, Map<WebSocket, { userId: string; username: string }>>();
+      const socketLiveness = new WeakMap<WebSocket, boolean>();
+      let socketCounter = 0;
 
-    io.on('connection', (socket: any) => {
-      socket.on('join-entry', ({ entryId, user }: { entryId: string, user: any }) => {
-        const existing = activeUsers.get(socket.id);
-        if (existing && existing.entryId !== entryId) {
-          socket.leave(`entry-${existing.entryId}`);
-          activeUsers.delete(socket.id);
-          broadcastRoom(existing.entryId);
+      const cleanupSocket = (ws: WebSocket) => {
+        const state = socketState.get(ws);
+
+        for (const [entryId, users] of typingUsers.entries()) {
+          if (users.delete(ws) && users.size === 0) typingUsers.delete(entryId);
         }
-        activeUsers.set(socket.id, { entryId, socketId: socket.id, color: getColorForUser(user?.id), ...user });
-        socket.join(`entry-${entryId}`);
-        broadcastRoom(entryId);
-      });
 
-      socket.on('leave-entry', ({ entryId }: { entryId: string }) => {
-        const existing = activeUsers.get(socket.id);
-        if (existing && existing.entryId === entryId) {
-          socket.leave(`entry-${entryId}`);
-          activeUsers.delete(socket.id);
-          const tSet = typingUsers.get(entryId);
-          if (tSet) { tSet.delete(socket.id); broadcastTyping(entryId); }
-          broadcastRoom(entryId);
+        if (state) {
+          leaveRoom(ws, state.entryId);
+          activeUsers.delete(state.socketId);
+          socketState.delete(ws);
+        } else {
+          for (const [entryId, room] of rooms.entries()) {
+            if (room.delete(ws) && room.size === 0) rooms.delete(entryId);
+          }
         }
+
+        socketLiveness.delete(ws);
+      };
+
+      const HEARTBEAT_INTERVAL_MS = 30000;
+
+      wss.on('connection', (ws: WebSocket) => {
+        socketLiveness.set(ws, true);
+
+        ws.on('pong', () => {
+          socketLiveness.set(ws, true);
+        });
+
+        ws.on('close', () => {
+          cleanupSocket(ws);
+        });
       });
 
-      socket.on('user-typing', ({ entryId, userId, username }: { entryId: string; userId: string; username: string }) => {
-        if (!typingUsers.has(entryId)) typingUsers.set(entryId, new Map());
-        typingUsers.get(entryId)!.set(socket.id, { userId, username });
-        broadcastTyping(entryId);
-      });
+      const heartbeatInterval = setInterval(() => {
+        for (const ws of wss.clients) {
+          if (socketLiveness.get(ws as WebSocket) === false) {
+            cleanupSocket(ws as WebSocket);
+            ws.terminate();
+            continue;
+          }
 
-      socket.on('user-stop-typing', ({ entryId }: { entryId: string }) => {
-        const tSet = typingUsers.get(entryId);
-        if (tSet) { tSet.delete(socket.id); broadcastTyping(entryId); }
-      });
-
-      socket.on('disconnect', () => {
-        const user = activeUsers.get(socket.id);
-        if (user) {
-          const tSet = typingUsers.get(user.entryId);
-          if (tSet) { tSet.delete(socket.id); broadcastTyping(user.entryId); }
-          activeUsers.delete(socket.id);
-          broadcastRoom(user.entryId);
+          socketLiveness.set(ws as WebSocket, false);
+          try {
+            ws.ping();
+          } catch {
+            cleanupSocket(ws as WebSocket);
+            ws.terminate();
+          }
         }
-      });
-    });
+      }, HEARTBEAT_INTERVAL_MS);
 
-    strapi.io = io;
-    strapi.presenceActiveUsers = activeUsers;
-    strapi.log.info('[Presence] Socket.io attached successfully');
+      wss.on('close', () => {
+        clearInterval(heartbeatInterval);
+      });
+
+      const joinRoom = (ws: WebSocket, entryId: string) => {
+        if (!rooms.has(entryId)) rooms.set(entryId, new Set());
+        rooms.get(entryId)!.add(ws);
+      };
+
+      const leaveRoom = (ws: WebSocket, entryId: string) => {
+        const room = rooms.get(entryId);
+        if (room) {
+          room.delete(ws);
+          if (room.size === 0) rooms.delete(entryId);
+        }
+      };
+
+      const broadcastRoom = (entryId: string) => {
+        const users = Array.from(socketState.values())
+          .filter(s => s.entryId === entryId)
+          .map(s => s.user);
+        const message = JSON.stringify({ type: 'presence-update', users });
+        const room = rooms.get(entryId);
+        if (room) {
+          room.forEach(ws => {
+            if (ws.readyState === 1 /* OPEN */) ws.send(message);
+          });
+        }
+      };
+
+      const broadcastTyping = (entryId: string) => {
+        const set = typingUsers.get(entryId);
+        const users = set ? Array.from(set.values()) : [];
+        const message = JSON.stringify({ type: 'typing-update', users });
+        const room = rooms.get(entryId);
+        if (room) {
+          room.forEach(ws => {
+            if (ws.readyState === 1 /* OPEN */) ws.send(message);
+          });
+        }
+      };
+
+      wss.on('connection', (ws: WebSocket) => {
+        const socketId = `ws_${++socketCounter}_${Date.now()}`;
+
+        ws.on('message', (data: Buffer) => {
+          try {
+            const msg = JSON.parse(data.toString());
+
+            if (msg.type === 'join-entry') {
+              const { entryId, user } = msg;
+              const existing = socketState.get(ws);
+              if (existing && existing.entryId !== entryId) {
+                leaveRoom(ws, existing.entryId);
+                activeUsers.delete(existing.socketId);
+                const tSet = typingUsers.get(existing.entryId);
+                if (tSet) { tSet.delete(ws); broadcastTyping(existing.entryId); }
+                broadcastRoom(existing.entryId);
+              }
+              const userWithMeta = { entryId, socketId, color: getColorForUser(user?.id), ...user };
+              socketState.set(ws, { entryId, socketId, user: userWithMeta });
+              activeUsers.set(socketId, userWithMeta);
+              joinRoom(ws, entryId);
+              broadcastRoom(entryId);
+
+            } else if (msg.type === 'leave-entry') {
+              const { entryId } = msg;
+              const existing = socketState.get(ws);
+              if (existing && existing.entryId === entryId) {
+                leaveRoom(ws, entryId);
+                activeUsers.delete(existing.socketId);
+                const tSet = typingUsers.get(entryId);
+                if (tSet) { tSet.delete(ws); broadcastTyping(entryId); }
+                socketState.delete(ws);
+                broadcastRoom(entryId);
+              }
+
+            } else if (msg.type === 'user-typing') {
+              const { entryId, userId, username } = msg;
+              if (!typingUsers.has(entryId)) typingUsers.set(entryId, new Map());
+              typingUsers.get(entryId)!.set(ws, { userId, username });
+              broadcastTyping(entryId);
+
+            } else if (msg.type === 'user-stop-typing') {
+              const { entryId } = msg;
+              const tSet = typingUsers.get(entryId);
+              if (tSet) { tSet.delete(ws); broadcastTyping(entryId); }
+            }
+
+          } catch {
+            // Invalid JSON – ignore
+          }
+        });
+
+        ws.on('close', () => {
+          const state = socketState.get(ws);
+          if (state) {
+            const { entryId, socketId: sid } = state;
+            const tSet = typingUsers.get(entryId);
+            if (tSet) { tSet.delete(ws); broadcastTyping(entryId); }
+            leaveRoom(ws, entryId);
+            activeUsers.delete(sid);
+            socketState.delete(ws);
+            broadcastRoom(entryId);
+          }
+        });
+
+        ws.on('error', () => {
+          try { ws.close(); } catch {}
+        });
+      });
+
+      strapi.presenceWss = wss;
+      strapi.presenceActiveUsers = activeUsers;
+      strapi.log.info('[Presence] WebSocket server attached successfully at /ws/presence');
     });
 
     scheduleRetention(strapi);

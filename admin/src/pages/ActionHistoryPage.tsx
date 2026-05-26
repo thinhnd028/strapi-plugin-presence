@@ -157,13 +157,36 @@ const ActionHistoryPage = () => {
   // Fetch active users count (chỉ superadmin có quyền)
   useEffect(() => {
     let cancelled = false;
+    const getCookie = (name: string) => {
+      const value = `; ${document.cookie}`;
+      const parts = value.split(`; ${name}=`);
+      if (parts.length === 2) return parts.pop()?.split(';').shift() ?? null;
+      return null;
+    };
+    const getAuthToken = () =>
+      getCookie('jwtToken') ??
+      getCookie('token') ??
+      getCookie('strapi_admin_token') ??
+      localStorage.getItem('jwtToken') ??
+      localStorage.getItem('token') ??
+      localStorage.getItem('strapi_admin_token');
     const fetchActiveUsers = async () => {
       try {
         const base = getStrapiBasePath();
-        const res = await fetch(`${window.location.origin}${base}/presence/active-users`, {
-          credentials: 'include',
-        });
-        if (res.ok && !cancelled) {
+        const token = getAuthToken();
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const opts = { credentials: 'include' as const, headers };
+        const urls = [
+          `${window.location.origin}${base}/presence/active-users`,
+          `${window.location.origin}${base}/api/presence/active-users`,
+        ];
+        let res: Response | null = null;
+        for (const url of urls) {
+          res = await fetch(url, opts);
+          if (res.ok) break;
+        }
+        if (res?.ok && !cancelled) {
           const json = (await res.json()) as { uniqueCount?: number; count?: number };
           setActiveUsersCount(json.uniqueCount ?? json.count ?? 0);
         }
