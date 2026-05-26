@@ -195,6 +195,8 @@ export default {
               if (existing && existing.entryId !== entryId) {
                 leaveRoom(ws, existing.entryId);
                 activeUsers.delete(existing.socketId);
+                const tSet = typingUsers.get(existing.entryId);
+                if (tSet) { tSet.delete(ws); broadcastTyping(existing.entryId); }
                 broadcastRoom(existing.entryId);
               }
               const userWithMeta = { entryId, socketId, color: getColorForUser(user?.id), ...user };
