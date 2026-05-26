@@ -1,8 +1,6 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 // @ts-ignore
 import { useParams, useLocation } from 'react-router-dom';
-// @ts-ignore
-import { io, Socket } from 'socket.io-client';
 
 const avatarColors = [
     '#4945ff', '#32d08d', '#ff5d5d', '#ffb54d',
@@ -15,20 +13,74 @@ const getStrapiBasePath = (): string => {
     return adminIndex > 0 ? path.substring(0, adminIndex) : '';
 };
 
+const getColor = (id: any): string => {
+    const strId = String(id);
+    let hash = 0;
+    for (let i = 0; i < strId.length; i++) {
+        hash = strId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return avatarColors[Math.abs(hash) % avatarColors.length];
+};
+
+/**
+ * Lấy contentType UID từ pathname Content Manager:
+ *   /admin/content-manager/collection-types/api::page.page/abc123 → api::page.page
+ *   /admin/content-manager/single-types/api::about-page.about-page → api::about-page.about-page
+ * Trả về '' nếu không phải URL Content Manager (giữ entryId ổn định cho route khác).
+ */
+const extractContentTypeUid = (pathname: string): string => {
+    const match = pathname.match(/\/content-manager\/(?:collection-types|single-types)\/([^/?#]+)/);
+    return match?.[1] ?? '';
+};
+
 const PresenceAvatars = () => {
     const params = useParams<any>();
     const location = useLocation();
-    const entryId = params.id || params.documentId || params.slug || (location?.pathname || "");
+    const docPart = params.id || params.documentId || params.slug || '';
+    const contentTypeUid = extractContentTypeUid(location?.pathname || '');
+    // Gom theo contentType + documentId để hai content type cùng documentId không va phòng,
+    // nhưng draft và published của CÙNG document vẫn chung phòng (status nằm trong query string, không tính).
+    const entryId = contentTypeUid && docPart
+        ? `${contentTypeUid}:${docPart}`
+        : (docPart || (location?.pathname || ''));
 
     const [allUsers, setAllUsers] = useState<any[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [typingUsers, setTypingUsers] = useState<any[]>([]);
-    const socketRef = useRef<any>(null);
+
+    const wsRef = useRef<WebSocket | null>(null);
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const prevEntryIdRef = useRef<string | null>(null);
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const reconnectCountRef = useRef(0);
+    const mountedRef = useRef(true);
+    const currentUserRef = useRef<any>(null);
+    const entryIdRef = useRef<string>(entryId);
 
-    // ---- Fetch current admin user (once) ----
+    useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+    useEffect(() => { entryIdRef.current = entryId; }, [entryId]);
+
+    const sendMsg = useCallback((data: object) => {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(data));
+        }
+    }, []);
+
+    // Unmount cleanup
+    useEffect(() => {
+        return () => {
+            mountedRef.current = false;
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
+        };
+    }, []);
+
+    // Fetch current admin user (once)
     useEffect(() => {
         const getCookie = (name: string) => {
             const value = `; ${document.cookie}`;
@@ -85,99 +137,88 @@ const PresenceAvatars = () => {
         fetchMe();
     }, []);
 
-    // ---- Create & manage socket lifecycle ----
+    // Create WebSocket connection once when currentUser is ready
     useEffect(() => {
-        if (!entryId || !currentUser) return;
+        if (!currentUser) return;
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) return;
 
-        // Create socket if not exists or disconnected
-        if (!socketRef.current || socketRef.current.disconnected) {
-            try {
-                const basePath = getStrapiBasePath();
-                socketRef.current = io(window.location.origin, {
-                    path: `${basePath}/socket.io/`,
-                    transports: ['websocket', 'polling'],
-                    reconnection: true,
-                    reconnectionAttempts: 10,
-                    reconnectionDelay: 1000,
-                    reconnectionDelayMax: 5000,
-                });
-            } catch {
-                return;
-            }
-        }
+        const basePath = getStrapiBasePath();
 
-        const socket = socketRef.current;
+        const connect = () => {
+            if (!mountedRef.current) return;
 
-        // Leave previous room if entryId changed
-        const prevEntryId = prevEntryIdRef.current;
-        if (prevEntryId && prevEntryId !== entryId) {
-            socket.emit('leave-entry', { entryId: prevEntryId });
-            setAllUsers([]); setTypingUsers([]);
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${proto}//${window.location.host}${basePath}/ws/presence`);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                if (!mountedRef.current) { ws.close(); return; }
+                reconnectCountRef.current = 0;
+                setIsConnected(true);
+                const eid = entryIdRef.current;
+                const user = currentUserRef.current;
+                if (eid && user) {
+                    ws.send(JSON.stringify({ type: 'join-entry', entryId: eid, user }));
+                }
+            };
+
+            ws.onmessage = (event: MessageEvent) => {
+                if (!mountedRef.current) return;
+                try {
+                    const msg = JSON.parse(event.data as string);
+                    if (msg.type === 'presence-update') {
+                        const raw: any[] = msg.users || [];
+                        setAllUsers(Array.from(new Map(raw.map(u => [u.id, u])).values()));
+                    } else if (msg.type === 'typing-update') {
+                        setTypingUsers(msg.users || []);
+                    }
+                } catch {}
+            };
+
+            ws.onclose = () => {
+                if (!mountedRef.current) return;
+                setIsConnected(false);
+                setAllUsers([]);
+                setTypingUsers([]);
+                if (reconnectCountRef.current < 10) {
+                    const delay = Math.min(1000 * Math.pow(1.5, reconnectCountRef.current), 5000);
+                    reconnectCountRef.current++;
+                    reconnectTimerRef.current = setTimeout(connect, delay);
+                }
+            };
+
+            ws.onerror = () => {};
+        };
+
+        connect();
+    }, [currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Handle entryId changes: leave old room, join new room
+    useEffect(() => {
+        if (!entryId) return;
+
+        const prev = prevEntryIdRef.current;
+        if (prev && prev !== entryId) {
+            sendMsg({ type: 'leave-entry', entryId: prev });
+            setAllUsers([]);
+            setTypingUsers([]);
         }
         prevEntryIdRef.current = entryId;
 
-        // Join the new room
-        const joinRoom = () => {
-            socket.emit('join-entry', { entryId, user: currentUser });
-            setIsConnected(true);
-        };
-
-        const onConnect = () => {
-            setIsConnected(true);
-            joinRoom();
-        };
-
-        const onReconnect = () => {
-            // Re-join current room after reconnection
-            joinRoom();
-        };
-
-        const onUpdate = (users: any[]) => {
-            const raw = users || [];
-            const uniqueUsers = Array.from(
-                new Map(raw.map((u: any) => [u.id, u])).values()
-            );
-            setAllUsers(uniqueUsers);
-        };
-
-        const onDisconnect = () => {
-            setIsConnected(false);
-        };
-
-        socket.on('connect', onConnect);
-        socket.on('reconnect', onReconnect);
-        socket.on('presence-update', onUpdate);
-        socket.on('typing-update', (users: any[]) => setTypingUsers(users || []));
-        socket.on('disconnect', onDisconnect);
-
-        // If already connected, join immediately
-        if (socket.connected) {
-            joinRoom();
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN && currentUser) {
+            ws.send(JSON.stringify({ type: 'join-entry', entryId, user: currentUser }));
         }
+    }, [entryId, currentUser, sendMsg]);
 
-        return () => {
-            socket.off('connect', onConnect);
-            socket.off('reconnect', onReconnect);
-            socket.off('presence-update', onUpdate);
-            socket.off('typing-update');
-            socket.off('disconnect', onDisconnect);
-
-            // Leave current room but DON'T disconnect socket
-            if (entryId) {
-                socket.emit('leave-entry', { entryId });
-            }
-        };
-    }, [entryId, currentUser]);
-
-    // ---- Emit typing to socket so others in room see it ----
+    // Emit typing events
     useEffect(() => {
-        if (!entryId || !currentUser || !socketRef.current) return;
-        const socket = socketRef.current;
+        if (!entryId || !currentUser) return;
         const emitTyping = () => {
-            socket.emit('user-typing', { entryId, userId: currentUser.id, username: currentUser.username });
+            sendMsg({ type: 'user-typing', entryId, userId: currentUser.id, username: currentUser.username });
             if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
             typingTimeoutRef.current = setTimeout(() => {
-                socket.emit('user-stop-typing', { entryId });
+                sendMsg({ type: 'user-stop-typing', entryId });
                 typingTimeoutRef.current = null;
             }, 1500);
         };
@@ -187,30 +228,11 @@ const PresenceAvatars = () => {
             document.removeEventListener('input', emitTyping);
             document.removeEventListener('keydown', emitTyping);
             if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-            socket.emit('user-stop-typing', { entryId });
+            sendMsg({ type: 'user-stop-typing', entryId });
         };
-    }, [entryId, currentUser]);
-
-    // ---- Disconnect socket only on full unmount ----
-    useEffect(() => {
-        return () => {
-            if (socketRef.current) {
-                socketRef.current.disconnect();
-                socketRef.current = null;
-            }
-        };
-    }, []);
+    }, [entryId, currentUser, sendMsg]);
 
     if (!entryId) return null;
-
-    const getColor = (id: any) => {
-        const strId = String(id);
-        let hash = 0;
-        for (let i = 0; i < strId.length; i++) {
-            hash = strId.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        return avatarColors[Math.abs(hash) % avatarColors.length];
-    };
 
     return (
         <div className="presence-root-container">

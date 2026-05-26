@@ -28,6 +28,44 @@ function getComponentsDir(strapi: any): string | null {
   return null;
 }
 
+/** So sánh nông giá trị từng key trong payload với pre-state.
+ *  Trả về danh sách top-level field thay đổi. Empty array = no-op.
+ *  Dùng JSON.stringify để so cả object/array – đủ cho mục đích phát hiện no-op từ Content Manager. */
+function diffPayload(before: any, payload: any): string[] {
+  if (!payload || typeof payload !== 'object') return [];
+  if (!before || typeof before !== 'object') return Object.keys(payload);
+  const changed: string[] = [];
+  for (const key of Object.keys(payload)) {
+    if (key === 'id' || key === 'documentId' || key === 'createdAt' || key === 'updatedAt' || key === 'publishedAt' || key === 'locale') continue;
+    const a = normalizeForDiff(before[key]);
+    const b = normalizeForDiff(payload[key]);
+    if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(key);
+  }
+  return changed;
+}
+
+/** Chuẩn hoá relation/media về danh sách documentId để so sánh nhất quán giữa pre-state (object đầy đủ)
+ *  và payload (có thể là { set: [...] }, array ids, hoặc array objects). */
+function normalizeForDiff(val: any): any {
+  if (val == null) return null;
+  if (Array.isArray(val)) return val.map(normalizeForDiff);
+  if (typeof val === 'object') {
+    if ('set' in val && Array.isArray(val.set)) return val.set.map(normalizeForDiff);
+    if ('connect' in val || 'disconnect' in val) {
+      return { connect: (val.connect ?? []).map(normalizeForDiff), disconnect: (val.disconnect ?? []).map(normalizeForDiff) };
+    }
+    if ('documentId' in val) return { documentId: val.documentId };
+    if ('id' in val && Object.keys(val).length <= 3) return { documentId: String(val.id) };
+    const out: any = {};
+    for (const k of Object.keys(val).sort()) {
+      if (k === 'id' || k === 'createdAt' || k === 'updatedAt' || k === 'publishedAt') continue;
+      out[k] = normalizeForDiff(val[k]);
+    }
+    return out;
+  }
+  return val;
+}
+
 function isTrackedUid(uid: string): boolean {
   if (!uid) return false;
   return TRACKED_UID_PREFIXES.some((p) => uid.startsWith(p)) || false;
@@ -41,10 +79,12 @@ function shouldSnapshot(strapi: any, uid: string): boolean {
   return Array.isArray(list) && list.length > 0 && list.includes(uid);
 }
 
-function getUserInfo(strapi: any): { user: any; source: 'admin' | 'api' } {
+function getUserInfo(strapi: any): { user: any; source: 'admin' | 'api'; ip: string | null; userAgent: string | null } {
   try {
     const ctx = strapi.requestContext?.get?.();
-    if (!ctx?.state) return { user: null, source: 'api' };
+    const ip = ctx?.request?.ip ?? ctx?.ip ?? ctx?.request?.headers?.['x-forwarded-for'] ?? null;
+    const userAgent = ctx?.request?.headers?.['user-agent'] ?? null;
+    if (!ctx?.state) return { user: null, source: 'api', ip, userAgent };
     const cred = ctx.state?.auth?.credentials;
     if (cred?.id && cred?.email) {
       return {
@@ -54,6 +94,8 @@ function getUserInfo(strapi: any): { user: any; source: 'admin' | 'api' } {
           email: cred.email,
         },
         source: 'admin',
+        ip,
+        userAgent,
       };
     }
     const apiUser = ctx.state?.user;
@@ -61,11 +103,13 @@ function getUserInfo(strapi: any): { user: any; source: 'admin' | 'api' } {
       return {
         user: { id: apiUser.id, username: apiUser.username || apiUser.email, email: apiUser.email },
         source: 'api',
+        ip,
+        userAgent,
       };
     }
-    return { user: null, source: 'api' };
+    return { user: null, source: 'api', ip, userAgent };
   } catch {
-    return { user: null, source: 'api' };
+    return { user: null, source: 'api', ip: null, userAgent: null };
   }
 }
 
@@ -168,6 +212,26 @@ export function registerActionHistory(strapi: any) {
     const reqCtx = strapi.requestContext?.get?.();
     if (context.state?.isPresenceRestore || context.params?.state?.isPresenceRestore || reqCtx?.state?.isPresenceRestore) return next();
 
+    // Pre-fetch state để diff với payload (cho update) hoặc snapshot khi delete.
+    let preUpdateData: any = null;
+    if (action === 'update' && uid.startsWith('api::')) {
+      const docId = context.params?.documentId ?? context.params?.where?.documentId;
+      const localeParam = context.params?.locale;
+      if (docId) {
+        try {
+          preUpdateData = await strapi.documents(uid).findOne({
+            documentId: docId,
+            locale: localeParam || undefined,
+            status: 'draft',
+            populate: shouldSnapshot(strapi, uid) ? getDeepPopulate(strapi, uid, 5) : '*',
+            state: { isPresenceInternal: true },
+          });
+        } catch (err: any) {
+          strapi.log.warn(`[Presence] Pre-update fetch failed: ${err?.message}`);
+        }
+      }
+    }
+
     let preDeleteData: any = null;
     if (action === 'delete' && uid.startsWith('api::') && shouldSnapshot(strapi, uid)) {
       const docId = context.params?.documentId ?? context.params?.where?.documentId;
@@ -200,85 +264,101 @@ export function registerActionHistory(strapi: any) {
 
     const result = await next();
 
-    const { user, source } = getUserInfo(strapi);
+    const { user, source, ip, userAgent } = getUserInfo(strapi);
     const documentId = result?.documentId ?? context.params?.documentId ?? context.params?.where?.documentId ?? null;
     const locale = result?.locale ?? context.params?.locale ?? null;
     const payload = context.params?.data ?? null;
+    const snapshotStatus: 'draft' | 'published' = action === 'publish' ? 'published' : 'draft';
 
-    setTimeout(async () => {
-      try {
-        let versionDocumentId: string | null = null;
-        let beforeData: any = null;
+    let versionDocumentId: string | null = null;
+    let beforeData: any = null;
 
-        if (action === 'delete') {
-          if (preDeleteData && shouldSnapshot(strapi, uid)) {
-            beforeData = preDeleteData;
-            try {
-              const historyService = strapi.plugin('presence').service('history-service');
-              const author = user ? { id: user.id, email: user.email, username: user.username } : null;
-              const version = await historyService.createVersion(
-                documentId || String(preDeleteData?.documentId ?? preDeleteData?.id),
-                uid,
-                preDeleteData,
-                'draft',
-                author
-              );
-              versionDocumentId = version?.documentId ?? null;
-            } catch (err) {
-              strapi.log.warn(`[Presence] Delete snapshot failed: ${(err as Error).message}`);
-            }
-          } else {
-            beforeData = { payload: context.params, response: result };
-          }
-        } else if (uid.startsWith('api::') && ['create', 'update', 'publish'].includes(action) && documentId && shouldSnapshot(strapi, uid)) {
+    // No-op detection: chỉ áp dụng cho update. Các action khác (create/publish/unpublish/delete/discardDraft)
+    // mặc định coi là có thay đổi vì bản chất chúng đổi trạng thái document.
+    let changedFields: string[] | null = null;
+    let hasChanges = true;
+    if (action === 'update' && preUpdateData && payload && typeof payload === 'object') {
+      changedFields = diffPayload(preUpdateData, payload);
+      hasChanges = changedFields.length > 0;
+    } else if (action === 'create' && payload && typeof payload === 'object') {
+      changedFields = Object.keys(payload).filter((k) => k !== 'id' && k !== 'documentId');
+    }
+
+    try {
+      if (action === 'delete') {
+        if (preDeleteData && shouldSnapshot(strapi, uid)) {
+          beforeData = preDeleteData;
           try {
-            /** Luôn re-fetch với deep populate – result từ create/update thường thiếu dữ liệu con (nested components, relations) */
-            const deepPopulate = getDeepPopulate(strapi, uid, 5);
-            const snapshotData = await strapi.documents(uid).findOne({
-              documentId,
-              locale: locale || undefined,
-              status: action === 'publish' ? 'published' : 'draft',
-              populate: deepPopulate,
-              state: { isPresenceInternal: true },
-            });
-            if (snapshotData) {
-              const historyService = strapi.plugin('presence').service('history-service');
-              const author = user ? { id: user.id, email: user.email, username: user.username } : null;
-              const version = await historyService.createVersion(
-                documentId,
-                uid,
-                snapshotData,
-                'draft',
-                author
-              );
-              versionDocumentId = version?.documentId ?? null;
-            }
+            const historyService = strapi.plugin('presence').service('history-service');
+            const author = user ? { id: user.id, email: user.email, username: user.username } : null;
+            const version = await historyService.createVersion(
+              documentId || String(preDeleteData?.documentId ?? preDeleteData?.id),
+              uid,
+              preDeleteData,
+              'draft',
+              author
+            );
+            versionDocumentId = version?.documentId ?? null;
           } catch (err) {
-            strapi.log.warn(`[Presence] Snapshot failed: ${(err as Error).message}`);
+            strapi.log.warn(`[Presence] Delete snapshot failed: ${(err as Error).message}`);
           }
+        } else {
+          beforeData = { payload: context.params, response: result };
         }
-
-        await strapi.db.query(AUDIT_MODEL).create({
-          data: {
-            action,
-            contentType: uid,
-            targetDocumentId: documentId,
-            entryId: result?.id?.toString?.() ?? null,
-            user,
-            source,
-            beforeData,
-            afterData: action === 'delete' ? null : payload,
-            filters: locale ? { locale } : null,
-            resultCount: null,
-            versionDocumentId,
-          },
-        });
-
-        strapi.log.debug(`[Presence] ${action} ${uid.replace('api::', '').split('.')[0]} by ${user?.username || 'system'}`);
-      } catch (err) {
-        strapi.log.warn(`[Presence] Failed to log ${action} on ${uid}: ${(err as Error).message}`);
+      } else if (uid.startsWith('api::') && ['create', 'update', 'publish'].includes(action) && documentId && shouldSnapshot(strapi, uid) && hasChanges) {
+        try {
+          /** Luôn re-fetch với deep populate – result từ create/update thường thiếu dữ liệu con (nested components, relations) */
+          const deepPopulate = getDeepPopulate(strapi, uid, 5);
+          const snapshotData = await strapi.documents(uid).findOne({
+            documentId,
+            locale: locale || undefined,
+            status: snapshotStatus,
+            populate: deepPopulate,
+            state: { isPresenceInternal: true },
+          });
+          if (snapshotData) {
+            const historyService = strapi.plugin('presence').service('history-service');
+            const author = user ? { id: user.id, email: user.email, username: user.username } : null;
+            const version = await historyService.createVersion(
+              documentId,
+              uid,
+              snapshotData,
+              snapshotStatus,
+              author
+            );
+            versionDocumentId = version?.documentId ?? null;
+          }
+        } catch (err) {
+          strapi.log.warn(`[Presence] Snapshot failed: ${(err as Error).message}`);
+        }
       }
-    }, 600);
+
+      await strapi.db.query(AUDIT_MODEL).create({
+        data: {
+          action,
+          contentType: uid,
+          targetDocumentId: documentId,
+          entryId: result?.id?.toString?.() ?? null,
+          user,
+          source,
+          status: snapshotStatus,
+          locale,
+          ip,
+          userAgent,
+          beforeData,
+          afterData: action === 'delete' ? null : payload,
+          filters: locale ? { locale } : null,
+          resultCount: null,
+          versionDocumentId,
+          hasChanges,
+          changedFields: changedFields && changedFields.length > 0 ? changedFields : null,
+        },
+      });
+
+      strapi.log.debug(`[Presence] ${action} ${uid.replace('api::', '').split('.')[0]} by ${user?.username || 'system'}${hasChanges ? '' : ' (no-op)'}`);
+    } catch (err) {
+      strapi.log.warn(`[Presence] Failed to log ${action} on ${uid}: ${(err as Error).message}`);
+    }
 
     return result;
   });
@@ -321,7 +401,7 @@ export function registerActionHistory(strapi: any) {
 /** Log action from db lifecycle (Media, Users, Roles - models that may use db directly) */
 async function logFromLifecycle(strapi: any, action: string, model: string, data: any, beforeDataArg?: any) {
   if (model === AUDIT_MODEL) return;
-  const { user, source } = getUserInfo(strapi);
+  const { user, source, ip, userAgent } = getUserInfo(strapi);
   const documentId = data?.documentId ?? data?.id?.toString?.() ?? data?.where?.id?.toString?.() ?? data?.where?.documentId ?? null;
   const entryId = data?.id?.toString?.() ?? data?.documentId ?? data?.where?.id?.toString?.() ?? data?.where?.documentId ?? null;
   const payload = action === 'delete' ? null : (data && typeof data === 'object' ? { ...data } : null);
@@ -359,11 +439,17 @@ async function logFromLifecycle(strapi: any, action: string, model: string, data
         entryId,
         user,
         source,
+        status: 'draft',
+        locale: null,
+        ip,
+        userAgent,
         beforeData,
         afterData: payload,
         filters: null,
         resultCount: null,
         versionDocumentId,
+        hasChanges: true,
+        changedFields: null,
       },
     })
     .catch((err: Error) => strapi.log.warn(`[Presence] Lifecycle audit failed: ${err.message}`));
