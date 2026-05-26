@@ -185,9 +185,21 @@ export default {
       wss.on('connection', (ws: WebSocket) => {
         const socketId = `ws_${++socketCounter}_${Date.now()}`;
 
-        ws.on('message', (data: Buffer) => {
+        ws.on('message', (data: import('ws').RawData) => {
           try {
-            const msg = JSON.parse(data.toString());
+            let text: string;
+            if (typeof data === 'string') {
+              text = data;
+            } else if (Buffer.isBuffer(data)) {
+              text = data.toString('utf8');
+            } else if (data instanceof ArrayBuffer) {
+              text = Buffer.from(data).toString('utf8');
+            } else if (Array.isArray(data)) {
+              text = Buffer.concat(data).toString('utf8');
+            } else {
+              text = String(data);
+            }
+            const msg = JSON.parse(text);
 
             if (msg.type === 'join-entry') {
               const { entryId, user } = msg;
