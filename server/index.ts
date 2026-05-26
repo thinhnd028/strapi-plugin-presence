@@ -85,7 +85,64 @@ export default {
       const rooms = new Map<string, Set<WebSocket>>();
       // entryId → Map<WebSocket, { userId, username }>
       const typingUsers = new Map<string, Map<WebSocket, { userId: string; username: string }>>();
+      const socketLiveness = new WeakMap<WebSocket, boolean>();
       let socketCounter = 0;
+
+      const cleanupSocket = (ws: WebSocket) => {
+        const state = socketState.get(ws);
+
+        for (const [entryId, users] of typingUsers.entries()) {
+          if (users.delete(ws) && users.size === 0) typingUsers.delete(entryId);
+        }
+
+        if (state) {
+          leaveRoom(ws, state.entryId);
+          activeUsers.delete(state.socketId);
+          socketState.delete(ws);
+        } else {
+          for (const [entryId, room] of rooms.entries()) {
+            if (room.delete(ws) && room.size === 0) rooms.delete(entryId);
+          }
+        }
+
+        socketLiveness.delete(ws);
+      };
+
+      const HEARTBEAT_INTERVAL_MS = 30000;
+
+      wss.on('connection', (ws: WebSocket) => {
+        socketLiveness.set(ws, true);
+
+        ws.on('pong', () => {
+          socketLiveness.set(ws, true);
+        });
+
+        ws.on('close', () => {
+          cleanupSocket(ws);
+        });
+      });
+
+      const heartbeatInterval = setInterval(() => {
+        for (const ws of wss.clients) {
+          if (socketLiveness.get(ws as WebSocket) === false) {
+            cleanupSocket(ws as WebSocket);
+            ws.terminate();
+            continue;
+          }
+
+          socketLiveness.set(ws as WebSocket, false);
+          try {
+            ws.ping();
+          } catch {
+            cleanupSocket(ws as WebSocket);
+            ws.terminate();
+          }
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+
+      wss.on('close', () => {
+        clearInterval(heartbeatInterval);
+      });
 
       const joinRoom = (ws: WebSocket, entryId: string) => {
         if (!rooms.has(entryId)) rooms.set(entryId, new Set());
