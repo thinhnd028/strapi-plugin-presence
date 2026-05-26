@@ -110,7 +110,7 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
               </div>
             </div>
 
-            {entry.filters && typeof entry.filters === 'object' && 'locale' in entry.filters && (
+            {(entry.locale || (entry.filters && typeof entry.filters === 'object' && 'locale' in entry.filters)) && (
               <div>
                 <span style={sty.sectionTitle}>Locale</span>
                 <span
@@ -123,8 +123,70 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
                     fontWeight: 600,
                   }}
                 >
-                  {String((entry.filters as { locale?: string }).locale ?? "")}
+                  {String((entry.locale as string) ?? (entry.filters as { locale?: string })?.locale ?? "")}
                 </span>
+              </div>
+            )}
+
+            {/* Trạng thái thay đổi: hiện chips changedFields hoặc nhãn "No changes" */}
+            {(entry.hasChanges === false || (Array.isArray(entry.changedFields) && entry.changedFields.length > 0)) && (
+              <div>
+                <span style={sty.sectionTitle}>Changed fields</span>
+                {entry.hasChanges === false ? (
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      padding: '3px 10px',
+                      borderRadius: 4,
+                      background: '#eceff1',
+                      color: '#546e7a',
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    No changes (no-op)
+                  </span>
+                ) : (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {(entry.changedFields as string[]).map((f) => (
+                      <span
+                        key={f}
+                        style={{
+                          padding: '3px 10px',
+                          borderRadius: 4,
+                          background: '#fdf4dc',
+                          color: '#9e6d14',
+                          fontSize: 12,
+                          fontWeight: 600,
+                          fontFamily: 'monospace',
+                        }}
+                      >
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(entry.ip || entry.userAgent) && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16 }}>
+                {entry.ip && (
+                  <div>
+                    <span style={sty.sectionTitle}>IP address</span>
+                    <Typography variant="pi" style={{ fontFamily: 'monospace' }}>
+                      {String(entry.ip)}
+                    </Typography>
+                  </div>
+                )}
+                {entry.userAgent && (
+                  <div style={{ minWidth: 0 }}>
+                    <span style={sty.sectionTitle}>User agent</span>
+                    <Typography variant="pi" textColor="neutral600" style={{ wordBreak: 'break-all' }}>
+                      {String(entry.userAgent)}
+                    </Typography>
+                  </div>
+                )}
               </div>
             )}
 
