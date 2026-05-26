@@ -26,21 +26,16 @@ export default ({ strapi }: { strapi: any }) => ({
     }
     if (!user) return ctx.unauthorized('User not found');
 
-    const engine = strapi.admin?.services?.permission?.engine;
-    if (engine?.check) {
-      const allowed = await engine.check({
-        ability: user,
-        action: 'plugin::presence.access-active-users',
-        subject: null,
-      });
-      if (!allowed) return ctx.forbidden('Insufficient permission');
-    } else {
-      const perms = user?.permissions ?? user?.role?.permissions ?? [];
-      const hasPermission = Array.isArray(perms) && perms.some(
-        (p: any) => p?.action === 'plugin::presence.access-active-users'
-      );
-      if (!hasPermission) return ctx.forbidden('Insufficient permission');
-    }
+    const rolePermissions = Array.isArray(user?.roles)
+      ? user.roles.flatMap((role: any) => Array.isArray(role?.permissions) ? role.permissions : [])
+      : [];
+    const directPermissions = Array.isArray(user?.permissions) ? user.permissions : [];
+    const singleRolePermissions = Array.isArray(user?.role?.permissions) ? user.role.permissions : [];
+    const perms = [...rolePermissions, ...directPermissions, ...singleRolePermissions];
+    const hasPermission = perms.some(
+      (p: any) => p?.action === 'plugin::presence.access-active-users'
+    );
+    if (!hasPermission) return ctx.forbidden('Insufficient permission');
 
     const activeUsers = (strapi as any).presenceActiveUsers as Map<string, any> | undefined;
     if (!activeUsers || !(activeUsers instanceof Map)) {
