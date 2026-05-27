@@ -90,6 +90,13 @@ export default {
       const socketLiveness = new WeakMap<WebSocket, boolean>();
       let socketCounter = 0;
 
+      const STATUS_RANK: Record<string, number> = { active: 3, idle: 2, away: 1 };
+      const pickStrongerStatus = (a: string | undefined, b: string | undefined): string => {
+        const ra = STATUS_RANK[a as string] ?? 0;
+        const rb = STATUS_RANK[b as string] ?? 0;
+        return ra >= rb ? (a || 'active') : (b || 'active');
+      };
+
       /** Tính snapshot global users (gộp theo userId – 1 user nhiều tab) và broadcast cho subscribers. */
       const computeGlobalUsersPayload = () => {
         const all = Array.from(activeUsers.values());
@@ -101,6 +108,8 @@ export default {
           if (existing) {
             if (u?.entryId && !existing.entries.includes(u.entryId)) existing.entries.push(u.entryId);
             existing.tabCount += 1;
+            // Status tổng hợp: ưu tiên active > idle > away (1 user nhiều tab, lấy tab "tỉnh" nhất)
+            existing.status = pickStrongerStatus(existing.status, u?.status);
           } else {
             byUser.set(key, {
               id: u?.id ?? null,
@@ -108,6 +117,7 @@ export default {
               email: u?.email ?? null,
               initials: u?.initials ?? null,
               color: u?.color ?? null,
+              status: u?.status ?? 'active',
               entries: u?.entryId ? [u.entryId] : [],
               tabCount: 1,
             });
@@ -237,7 +247,7 @@ export default {
                 if (tSet) { tSet.delete(ws); broadcastTyping(existing.entryId); }
                 broadcastRoom(existing.entryId);
               }
-              const userWithMeta = { entryId, socketId, color: getColorForUser(user?.id), ...user };
+              const userWithMeta = { entryId, socketId, color: getColorForUser(user?.id), status: 'active', ...user };
               socketState.set(ws, { entryId, socketId, user: userWithMeta });
               activeUsers.set(socketId, userWithMeta);
               joinRoom(ws, entryId);
@@ -264,6 +274,18 @@ export default {
 
             } else if (msg.type === 'unsubscribe-global-users') {
               globalSubscribers.delete(ws);
+
+            } else if (msg.type === 'update-status') {
+              // Cập nhật status ('active' | 'idle' | 'away') cho user hiện tại. Typing là kênh riêng.
+              const existing = socketState.get(ws);
+              if (existing) {
+                const allowed = ['active', 'idle', 'away'];
+                const next = allowed.includes(msg.status) ? msg.status : 'active';
+                existing.user.status = next;
+                activeUsers.set(existing.socketId, existing.user);
+                broadcastRoom(existing.entryId);
+                broadcastGlobalUsers();
+              }
 
             } else if (msg.type === 'user-typing') {
               const { entryId, userId, username } = msg;

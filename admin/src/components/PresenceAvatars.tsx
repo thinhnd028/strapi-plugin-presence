@@ -179,6 +179,57 @@ const PresenceAvatars = () => {
         }
     }, [entryId, currentUser, sendMsg]);
 
+    // Activity & visibility tracking → status='active' | 'idle' | 'away'
+    // - away: tab bị ẩn (visibilitychange hidden)
+    // - idle: tab visible nhưng không có input/move trong IDLE_MS (5 phút)
+    // - active: tab visible + có hoạt động gần đây
+    useEffect(() => {
+        if (!currentUser) return;
+        const IDLE_MS = 5 * 60 * 1000;
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        let currentStatus: 'active' | 'idle' | 'away' = 'active';
+
+        const sendStatus = (next: 'active' | 'idle' | 'away') => {
+            if (next === currentStatus) return;
+            currentStatus = next;
+            sendMsg({ type: 'update-status', status: next });
+        };
+
+        const armIdle = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => sendStatus('idle'), IDLE_MS);
+        };
+
+        const onActivity = () => {
+            if (document.hidden) return;
+            sendStatus('active');
+            armIdle();
+        };
+
+        const onVisibility = () => {
+            if (document.hidden) {
+                if (idleTimer) clearTimeout(idleTimer);
+                sendStatus('away');
+            } else {
+                sendStatus('active');
+                armIdle();
+            }
+        };
+
+        const events = ['keydown', 'mousemove', 'click', 'scroll', 'input', 'touchstart'];
+        for (const e of events) document.addEventListener(e, onActivity, { passive: true });
+        document.addEventListener('visibilitychange', onVisibility);
+        armIdle();
+        // Sync trạng thái ngay khi reconnect (WS có thể vừa mở sau khi component đã chạy)
+        sendStatus(document.hidden ? 'away' : 'active');
+
+        return () => {
+            for (const e of events) document.removeEventListener(e, onActivity);
+            document.removeEventListener('visibilitychange', onVisibility);
+            if (idleTimer) clearTimeout(idleTimer);
+        };
+    }, [currentUser, sendMsg]);
+
     // Emit typing events
     useEffect(() => {
         if (!entryId || !currentUser) return;

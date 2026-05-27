@@ -1,5 +1,5 @@
 import React from 'react';
-import { Typography, Button, Modal, Flex, JSONInput } from '@strapi/design-system';
+import { Typography, Button, Modal, Flex } from '@strapi/design-system';
 import { Link } from '@strapi/icons';
 
 const ACTION_LABELS: Record<string, { label: string; bg: string; fg: string }> = {
@@ -96,6 +96,42 @@ export interface DetailModalProps {
   onClose: () => void;
 }
 
+/** Format bytes về dạng dễ đọc (B/KB/MB). */
+const formatBytes = (n: number): string => {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+};
+
+/** Payload section: hiện size + nút View → mở tab mới render JSON như endpoint API. */
+const PayloadBlock = ({ data }: { data: unknown }) => {
+  const json = JSON.stringify(data, null, 2);
+  const size = new Blob([json]).size;
+
+  const openInTab = () => {
+    // Tạo blob URL với content-type application/json — Chrome/Firefox tự pretty-print, có cây JSON.
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener,noreferrer');
+    // Giải phóng URL sau ít phút (tab mới đã giữ reference khi nó load xong)
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  };
+
+  return (
+    <div>
+      <Flex alignItems="center" gap={2}>
+        <span style={sty.sectionTitle}>Payload</span>
+        <span style={{ fontSize: 11, fontWeight: 600, color: '#666687', padding: '2px 8px', borderRadius: 4, background: '#eaeaef' }}>
+          {formatBytes(size)}
+        </span>
+        <Button size="S" variant="tertiary" onClick={openInTab}>
+          View
+        </Button>
+      </Flex>
+    </div>
+  );
+};
+
 const DetailModal = ({ entry, onClose }: DetailModalProps) => {
   const ai =
     ACTION_LABELS[entry.action as string] || { label: (entry.action as string) ?? '', bg: '#f0f0ff', fg: '#666' };
@@ -104,7 +140,7 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
 
   return (
     <Modal.Root open onOpenChange={onClose}>
-      <Modal.Content>
+      <Modal.Content style={{ maxWidth: 'min(1280px, 95vw)', width: '95vw' }}>
         <Modal.Header>
           <Typography variant="beta" tag="h2">
             Action details
@@ -165,7 +201,55 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
               </div>
             )}
 
-            {/* Trạng thái thay đổi: hiện chips changedFields hoặc nhãn "No changes" */}
+            {(entry.ip || entry.userAgent) && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16 }}>
+                {entry.ip && (
+                  <div>
+                    <span style={sty.sectionTitle}>IP address</span>
+                    <Typography variant="pi" style={{ fontFamily: 'monospace' }}>
+                      {String(entry.ip)}
+                    </Typography>
+                  </div>
+                )}
+                {entry.userAgent && (
+                  <div style={{ minWidth: 0 }}>
+                    <span style={sty.sectionTitle}>User agent</span>
+                    <Typography variant="pi" textColor="neutral600" style={{ wordBreak: 'break-all' }}>
+                      {String(entry.userAgent)}
+                    </Typography>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {entry.versionDocumentId && (
+              <div>
+                <span style={sty.sectionTitle}>Version snapshot</span>
+                <a
+                  href={`${base}/admin/content-manager/collection-types/plugin::presence.version/${entry.versionDocumentId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    color: '#4945ff',
+                    fontWeight: 600,
+                    fontSize: 13,
+                    textDecoration: 'none',
+                  }}
+                >
+                  <Link width={16} height={16} /> View snapshot
+                </a>
+              </div>
+            )}
+
+            {entry.afterData && typeof entry.afterData === 'object' && Object.keys(entry.afterData as object).length > 0 && (
+              <PayloadBlock data={entry.afterData} />
+            )}
+
+            {/* Trạng thái thay đổi: hiện chips changedFields hoặc bảng Before/After.
+                Đặt cuối cùng vì có thể rất dài khi sửa nhiều field. */}
             {(entry.hasChanges === false || (Array.isArray(entry.changedFields) && entry.changedFields.length > 0)) && (
               <div>
                 <span style={sty.sectionTitle}>Changed fields</span>
@@ -243,62 +327,6 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
               </div>
             )}
 
-            {(entry.ip || entry.userAgent) && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16 }}>
-                {entry.ip && (
-                  <div>
-                    <span style={sty.sectionTitle}>IP address</span>
-                    <Typography variant="pi" style={{ fontFamily: 'monospace' }}>
-                      {String(entry.ip)}
-                    </Typography>
-                  </div>
-                )}
-                {entry.userAgent && (
-                  <div style={{ minWidth: 0 }}>
-                    <span style={sty.sectionTitle}>User agent</span>
-                    <Typography variant="pi" textColor="neutral600" style={{ wordBreak: 'break-all' }}>
-                      {String(entry.userAgent)}
-                    </Typography>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {entry.versionDocumentId && (
-              <div>
-                <span style={sty.sectionTitle}>Version snapshot</span>
-                <a
-                  href={`${base}/admin/content-manager/collection-types/plugin::presence.version/${entry.versionDocumentId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    color: '#4945ff',
-                    fontWeight: 600,
-                    fontSize: 13,
-                    textDecoration: 'none',
-                  }}
-                >
-                  <Link width={16} height={16} /> View snapshot
-                </a>
-              </div>
-            )}
-
-            {entry.afterData && typeof entry.afterData === 'object' && Object.keys(entry.afterData as object).length > 0 && (
-              <div>
-                <span style={sty.sectionTitle}>Payload</span>
-                <JSONInput
-                  aria-label="JSON"
-                  value={JSON.stringify(
-                    entry.afterData,
-                    null,
-                    3,
-                  )}
-                />
-              </div>
-            )}
           </div>
         </Modal.Body>
         <Modal.Footer>

@@ -122,6 +122,7 @@ const ActionHistoryPage = () => {
     email: string | null;
     initials: string | null;
     color: string | null;
+    status: 'active' | 'idle' | 'away';
     entries: string[];
     tabCount: number;
   }>>([]);
@@ -370,6 +371,12 @@ const ActionHistoryPage = () => {
                     const bg = u.color || colorForId(u.id);
                     const name = u.username || u.email || 'Unknown';
                     const initials = u.initials || getInitials(name);
+                    const status = u.status ?? 'active';
+                    const statusMeta = {
+                      active: { dot: '#32d08d', label: 'Active', textColor: '#1f7a32' },
+                      idle:   { dot: '#f5c44a', label: 'Idle',   textColor: '#a07a14' },
+                      away:   { dot: '#a5a5ba', label: 'Away',   textColor: '#666687' },
+                    }[status] || { dot: '#32d08d', label: 'Active', textColor: '#1f7a32' };
                     return (
                       <Flex
                         key={String(u.id ?? name)}
@@ -383,30 +390,58 @@ const ActionHistoryPage = () => {
                         hasRadius
                         style={{ minWidth: 200 }}
                       >
-                        <Box
-                          style={{
-                            width: 36,
-                            height: 36,
-                            borderRadius: '50%',
-                            background: bg,
-                            color: 'white',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontWeight: 700,
-                            fontSize: 13,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {initials}
+                        <Box style={{ position: 'relative', flexShrink: 0 }}>
+                          <Box
+                            style={{
+                              width: 36,
+                              height: 36,
+                              borderRadius: '50%',
+                              background: bg,
+                              color: 'white',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontWeight: 700,
+                              fontSize: 13,
+                              opacity: status === 'away' ? 0.55 : 1,
+                            }}
+                          >
+                            {initials}
+                          </Box>
+                          <Box
+                            title={statusMeta.label}
+                            style={{
+                              position: 'absolute',
+                              bottom: -1,
+                              right: -1,
+                              width: 12,
+                              height: 12,
+                              borderRadius: '50%',
+                              background: statusMeta.dot,
+                              border: '2px solid #f6f6f9',
+                            }}
+                          />
                         </Box>
                         <Box style={{ minWidth: 0, flex: 1 }}>
-                          <Typography variant="omega" fontWeight="bold" ellipsis>
-                            {name}
-                          </Typography>
+                          <Flex alignItems="center" gap={2}>
+                            <Typography variant="omega" fontWeight="bold" ellipsis>
+                              {name}
+                            </Typography>
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: statusMeta.textColor,
+                                textTransform: 'uppercase',
+                                letterSpacing: 0.4,
+                              }}
+                            >
+                              {statusMeta.label}
+                            </span>
+                          </Flex>
                           <Typography variant="pi" textColor="neutral600" ellipsis>
                             {u.entries.length === 0
-                              ? 'idle'
+                              ? 'no entry'
                               : u.entries.length === 1
                                 ? fmtEntry(u.entries[0])
                                 : `${fmtEntry(u.entries[0])} +${u.entries.length - 1}`}
