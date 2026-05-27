@@ -8,7 +8,6 @@ import path from 'path';
 import fs from 'fs';
 
 const AUDIT_MODEL = 'plugin::presence.action-history';
-const VERSION_UID = 'plugin::presence.version';
 
 const TRACKED_ACTIONS = new Set([
   'create', 'update', 'publish', 'unpublish', 'delete', 'discardDraft',
@@ -28,20 +27,192 @@ function getComponentsDir(strapi: any): string | null {
   return null;
 }
 
-/** So sánh nông giá trị từng key trong payload với pre-state.
- *  Trả về danh sách top-level field thay đổi. Empty array = no-op.
- *  Dùng JSON.stringify để so cả object/array – đủ cho mục đích phát hiện no-op từ Content Manager. */
-function diffPayload(before: any, payload: any): string[] {
-  if (!payload || typeof payload !== 'object') return [];
-  if (!before || typeof before !== 'object') return Object.keys(payload);
-  const changed: string[] = [];
-  for (const key of Object.keys(payload)) {
-    if (key === 'id' || key === 'documentId' || key === 'createdAt' || key === 'updatedAt' || key === 'publishedAt' || key === 'locale') continue;
-    const a = normalizeForDiff(before[key]);
-    const b = normalizeForDiff(payload[key]);
-    if (JSON.stringify(a) !== JSON.stringify(b)) changed.push(key);
+/** Các field do hệ thống Strapi tự sinh — không phải user-editable, luôn bỏ qua khi diff.
+ *  Bao gồm timestamps, document metadata, tracked-by relations và i18n linkage. */
+const SYSTEM_FIELDS = new Set([
+  'id', 'documentId',
+  'createdAt', 'updatedAt', 'publishedAt',
+  'createdBy', 'updatedBy',
+  'locale', 'localizations',
+  'strapi_stage', 'strapi_assignee', 'strapi_release',
+  '__component',
+  // CM internal tracker cho item mới trong repeatable component, chỉ có ở payload
+  '__temp_key__',
+]);
+
+/** Object dạng relation/media payload từ Content Manager: { set: [...] } hoặc { connect, disconnect }.
+ *  Hoặc pre-state đã populate: object có documentId. Lưu ý: components trong Strapi v5 KHÔNG có
+ *  documentId (chỉ có id số), nên check theo documentId để không nhầm component thành relation. */
+function isRelationLike(val: any): boolean {
+  if (!val || typeof val !== 'object') return false;
+  if (Array.isArray(val)) {
+    return val.length > 0 && val.every((v) => v && typeof v === 'object' && 'documentId' in v && !('__component' in v));
   }
-  return changed;
+  if ('set' in val || 'connect' in val || 'disconnect' in val) return true;
+  if ('documentId' in val && !('__component' in val)) return true;
+  return false;
+}
+
+/** So sánh sâu payload với pre-state.
+ *  Trả về danh sách leaf-path đã đổi (vd: "seo.metaTitle", "sections[0].title").
+ *  - Bỏ qua mọi SYSTEM_FIELDS ở mọi cấp.
+ *  - Với relation/media field: chỉ báo tên field (không đi sâu vào property con của relation). */
+function diffPayload(before: any, payload: any): string[] {
+  const out: string[] = [];
+  // Root entity tự nó cũng có `documentId` — KHÔNG coi root là relation, iterate trực tiếp các key.
+  const beforeObj = before && typeof before === 'object' && !Array.isArray(before) ? before : {};
+  const payloadObj = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const keys = new Set([...Object.keys(beforeObj), ...Object.keys(payloadObj)]);
+  for (const key of keys) {
+    if (SYSTEM_FIELDS.has(key)) continue;
+    walkDiff(beforeObj[key], payloadObj[key], key, out);
+  }
+  return Array.from(new Set(out));
+}
+
+function walkDiff(before: any, payload: any, path: string, out: string[]): void {
+  // Cùng tham chiếu / cùng giá trị nguyên thuỷ
+  if (before === payload) return;
+
+  const beforeIsObj = before && typeof before === 'object';
+  const payloadIsObj = payload && typeof payload === 'object';
+
+  // Relation/media: so sánh theo danh sách documentId (canonicalize 2 format
+  // pre-state populated array vs payload {set} / {connect, disconnect} về cùng dạng).
+  if ((beforeIsObj || payloadIsObj) && (isRelationLike(before) || isRelationLike(payload))) {
+    if (diffRelation(before, payload)) {
+      if (path) out.push(path);
+    }
+    return;
+  }
+
+  // Mảng (component repeatable / dynamic zone / array scalar) – cho phép một bên thiếu
+  if (Array.isArray(before) || Array.isArray(payload)) {
+    const beforeArr = Array.isArray(before) ? before : [];
+    const payloadArr = Array.isArray(payload) ? payload : [];
+    const max = Math.max(beforeArr.length, payloadArr.length);
+    let lengthChanged = beforeArr.length !== payloadArr.length;
+    for (let i = 0; i < max; i++) {
+      const a = beforeArr[i];
+      const b = payloadArr[i];
+      if (a && b && typeof a === 'object' && typeof b === 'object') {
+        walkDiff(a, b, `${path}[${i}]`, out);
+      } else if (JSON.stringify(normalizeForDiff(a)) !== JSON.stringify(normalizeForDiff(b))) {
+        out.push(`${path}[${i}]`);
+      }
+    }
+    if (lengthChanged && path && !out.some((p) => p.startsWith(`${path}[`))) {
+      out.push(path);
+    }
+    return;
+  }
+
+  // Object thường (component, nested struct) – cho phép một bên thiếu (create / xoá nhánh)
+  const beforeIsPlainObj = beforeIsObj && !Array.isArray(before);
+  const payloadIsPlainObj = payloadIsObj && !Array.isArray(payload);
+  if (beforeIsPlainObj || payloadIsPlainObj) {
+    const beforeKeys = beforeIsPlainObj ? Object.keys(before) : [];
+    const payloadKeys = payloadIsPlainObj ? Object.keys(payload) : [];
+    const keys = new Set([...beforeKeys, ...payloadKeys]);
+    for (const key of keys) {
+      if (SYSTEM_FIELDS.has(key)) continue;
+      const subPath = path ? `${path}.${key}` : key;
+      walkDiff(beforeIsPlainObj ? before[key] : undefined, payloadIsPlainObj ? payload[key] : undefined, subPath, out);
+    }
+    return;
+  }
+
+  // Một bên null/undefined, hoặc kiểu khác nhau, hoặc primitive khác nhau
+  if (JSON.stringify(normalizeForDiff(before)) !== JSON.stringify(normalizeForDiff(payload))) {
+    if (path) out.push(path);
+  }
+}
+
+/** Lấy giá trị theo path dạng "a.b[2].c" trên object. Trả undefined nếu không tới được. */
+function getByPath(obj: any, path: string): any {
+  if (!path) return obj;
+  const tokens: Array<string | number> = [];
+  const re = /[^.[\]]+|\[(\d+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(path)) !== null) {
+    tokens.push(m[1] !== undefined ? Number(m[1]) : m[0]);
+  }
+  let cur: any = obj;
+  for (const tok of tokens) {
+    if (cur == null) return undefined;
+    cur = typeof tok === 'number' ? (Array.isArray(cur) ? cur[tok] : undefined) : cur[tok];
+  }
+  return cur;
+}
+
+/** Tóm tắt giá trị về dạng có thể lưu/hiển thị: scalar giữ nguyên, object/array → summary nhẹ. */
+function summarizeValue(val: any): any {
+  if (val == null) return null;
+  if (typeof val === 'string') return val.length > 2000 ? val.slice(0, 2000) + '…' : val;
+  if (typeof val === 'number' || typeof val === 'boolean') return val;
+  // Relation/media → list documentId
+  const ids = collectRelationIds(val);
+  if (ids != null) return ids.length === 0 ? null : (ids.length === 1 ? ids[0] : ids);
+  if (Array.isArray(val)) return `[Array(${val.length})]`;
+  if (typeof val === 'object') {
+    const json = JSON.stringify(val);
+    return json.length > 2000 ? json.slice(0, 2000) + '…' : json;
+  }
+  return String(val);
+}
+
+/** Sinh map { path -> { before, after } } cho từng changed leaf-path. */
+function buildChangedValues(before: any, payload: any, paths: string[]): Record<string, { before: any; after: any }> {
+  const out: Record<string, { before: any; after: any }> = {};
+  for (const p of paths) {
+    out[p] = {
+      before: summarizeValue(getByPath(before, p)),
+      after: summarizeValue(getByPath(payload, p)),
+    };
+  }
+  return out;
+}
+
+/** Thu thập danh sách documentId từ relation/media ở mọi format có thể gặp.
+ *  Trả null nếu là form {connect/disconnect} (không xác định được final state nếu không có before). */
+function collectRelationIds(val: any): string[] | null {
+  if (val == null) return [];
+  if (Array.isArray(val)) {
+    return val
+      .map((v) => (v && typeof v === 'object' ? String(v.documentId ?? v.id ?? '') : ''))
+      .filter(Boolean)
+      .sort();
+  }
+  if (typeof val === 'object') {
+    if ('set' in val && Array.isArray(val.set)) {
+      return val.set
+        .map((v: any) => (v && typeof v === 'object' ? String(v.documentId ?? v.id ?? '') : ''))
+        .filter(Boolean)
+        .sort();
+    }
+    if ('connect' in val || 'disconnect' in val) return null;
+    if ('documentId' in val) return [String(val.documentId)];
+    if ('id' in val) return [String(val.id)];
+  }
+  return [];
+}
+
+/** So sánh relation: trả true nếu thực sự đổi. */
+function diffRelation(before: any, payload: any): boolean {
+  // Payload form {connect/disconnect}: chỉ đổi nếu có item trong connect hoặc disconnect.
+  if (payload && typeof payload === 'object' && !Array.isArray(payload) &&
+    ('connect' in payload || 'disconnect' in payload) && !('set' in payload)) {
+    const c = Array.isArray(payload.connect) ? payload.connect.length : 0;
+    const d = Array.isArray(payload.disconnect) ? payload.disconnect.length : 0;
+    return c > 0 || d > 0;
+  }
+  const beforeIds = collectRelationIds(before) ?? [];
+  const payloadIds = collectRelationIds(payload) ?? [];
+  if (beforeIds.length !== payloadIds.length) return true;
+  for (let i = 0; i < beforeIds.length; i++) {
+    if (beforeIds[i] !== payloadIds[i]) return true;
+  }
+  return false;
 }
 
 /** Chuẩn hoá relation/media về danh sách documentId để so sánh nhất quán giữa pre-state (object đầy đủ)
@@ -54,8 +225,7 @@ function normalizeForDiff(val: any): any {
     if ('connect' in val || 'disconnect' in val) {
       return { connect: (val.connect ?? []).map(normalizeForDiff), disconnect: (val.disconnect ?? []).map(normalizeForDiff) };
     }
-    if ('documentId' in val) return { documentId: val.documentId };
-    if ('id' in val && Object.keys(val).length <= 3) return { documentId: String(val.id) };
+    if ('documentId' in val && !('__component' in val)) return { documentId: val.documentId };
     const out: any = {};
     for (const k of Object.keys(val).sort()) {
       if (k === 'id' || k === 'createdAt' || k === 'updatedAt' || k === 'publishedAt') continue;
@@ -223,7 +393,9 @@ export function registerActionHistory(strapi: any) {
             documentId: docId,
             locale: localeParam || undefined,
             status: 'draft',
-            populate: shouldSnapshot(strapi, uid) ? getDeepPopulate(strapi, uid, 5) : '*',
+            // Luôn deep-populate để diff thấy thay đổi ở component/DZ lồng — kể cả khi
+            // content-type không bật snapshot.
+            populate: getDeepPopulate(strapi, uid, 5),
             state: { isPresenceInternal: true },
           });
         } catch (err: any) {
@@ -276,12 +448,16 @@ export function registerActionHistory(strapi: any) {
     // No-op detection: chỉ áp dụng cho update. Các action khác (create/publish/unpublish/delete/discardDraft)
     // mặc định coi là có thay đổi vì bản chất chúng đổi trạng thái document.
     let changedFields: string[] | null = null;
+    let changedValues: Record<string, { before: any; after: any }> | null = null;
     let hasChanges = true;
     if (action === 'update' && preUpdateData && payload && typeof payload === 'object') {
       changedFields = diffPayload(preUpdateData, payload);
       hasChanges = changedFields.length > 0;
+      if (hasChanges) changedValues = buildChangedValues(preUpdateData, payload, changedFields);
     } else if (action === 'create' && payload && typeof payload === 'object') {
-      changedFields = Object.keys(payload).filter((k) => k !== 'id' && k !== 'documentId');
+      // Với create: diff với object rỗng để có cùng dạng leaf-path như update.
+      changedFields = diffPayload({}, payload);
+      if (changedFields.length > 0) changedValues = buildChangedValues({}, payload, changedFields);
     }
 
     try {
@@ -352,6 +528,7 @@ export function registerActionHistory(strapi: any) {
           versionDocumentId,
           hasChanges,
           changedFields: changedFields && changedFields.length > 0 ? changedFields : null,
+          changedValues,
         },
       });
 

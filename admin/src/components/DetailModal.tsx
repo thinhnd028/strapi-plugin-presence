@@ -25,6 +25,43 @@ const fmtCT = (uid: string) => {
   return m ? m[1] : uid;
 };
 
+/** Tokenize text giữ HTML tag, từ chữ-số, khoảng trắng, hoặc ký tự lẻ. Đủ tốt cho text/HTML ngắn. */
+const tokenize = (s: string): string[] => s.match(/<[^>]+>|[\p{L}\p{N}]+|\s+|./gu) || [];
+
+/** LCS-based diff. Trả về danh sách segment {type, text}. */
+const diffTokens = (a: string[], b: string[]): Array<{ type: 'eq' | 'del' | 'ins'; text: string }> => {
+  const n = a.length, m = b.length;
+  // Giới hạn an toàn: nếu tích quá lớn → fallback so sánh whole-string
+  if (n * m > 1_500_000) {
+    if (a.join('') === b.join('')) return [{ type: 'eq', text: a.join('') }];
+    return [{ type: 'del', text: a.join('') }, { type: 'ins', text: b.join('') }];
+  }
+  const dp: Uint32Array = new Uint32Array((n + 1) * (m + 1));
+  const idx = (i: number, j: number) => i * (m + 1) + j;
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[idx(i, j)] = a[i] === b[j] ? dp[idx(i + 1, j + 1)] + 1 : Math.max(dp[idx(i + 1, j)], dp[idx(i, j + 1)]);
+    }
+  }
+  const out: Array<{ type: 'eq' | 'del' | 'ins'; text: string }> = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ type: 'eq', text: a[i] }); i++; j++; }
+    else if (dp[idx(i + 1, j)] >= dp[idx(i, j + 1)]) { out.push({ type: 'del', text: a[i] }); i++; }
+    else { out.push({ type: 'ins', text: b[j] }); j++; }
+  }
+  while (i < n) { out.push({ type: 'del', text: a[i] }); i++; }
+  while (j < m) { out.push({ type: 'ins', text: b[j] }); j++; }
+  // Gộp segment liên tiếp cùng type cho gọn DOM
+  const merged: typeof out = [];
+  for (const seg of out) {
+    const last = merged[merged.length - 1];
+    if (last && last.type === seg.type) last.text += seg.text;
+    else merged.push({ ...seg });
+  }
+  return merged;
+};
+
 const fmtDate = (d: string) => {
   try {
     return new Date(d).toLocaleString();
@@ -147,24 +184,61 @@ const DetailModal = ({ entry, onClose }: DetailModalProps) => {
                     No changes (no-op)
                   </span>
                 ) : (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {(entry.changedFields as string[]).map((f) => (
-                      <span
-                        key={f}
-                        style={{
-                          padding: '3px 10px',
-                          borderRadius: 4,
-                          background: '#fdf4dc',
-                          color: '#9e6d14',
-                          fontSize: 12,
-                          fontWeight: 600,
-                          fontFamily: 'monospace',
-                        }}
-                      >
-                        {f}
-                      </span>
-                    ))}
-                  </div>
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {(entry.changedFields as string[]).map((f) => (
+                        <span
+                          key={f}
+                          style={{
+                            padding: '3px 10px',
+                            borderRadius: 4,
+                            background: '#fdf4dc',
+                            color: '#9e6d14',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            fontFamily: 'monospace',
+                          }}
+                        >
+                          {f}
+                        </span>
+                      ))}
+                    </div>
+                    {entry.changedValues && typeof entry.changedValues === 'object' && (
+                      <div style={{ marginTop: 12, border: '1px solid #eaeaef', borderRadius: 4, overflow: 'hidden' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', background: '#f6f6f9', padding: '6px 10px', fontSize: 11, fontWeight: 700, color: '#666687', textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                          <div>Field</div>
+                          <div>Before</div>
+                          <div>After</div>
+                        </div>
+                        {(entry.changedFields as string[]).map((f) => {
+                          const pair = (entry.changedValues as Record<string, { before: unknown; after: unknown }>)[f];
+                          const a = pair?.before;
+                          const b = pair?.after;
+                          const aStr = a == null ? '' : (typeof a === 'string' ? a : JSON.stringify(a));
+                          const bStr = b == null ? '' : (typeof b === 'string' ? b : JSON.stringify(b));
+                          const segs = diffTokens(tokenize(aStr), tokenize(bStr));
+                          const renderSide = (kind: 'before' | 'after') => {
+                            if ((kind === 'before' ? a : b) == null) return <span style={{ color: '#a5a5ba' }}>—</span>;
+                            const keepDel = kind === 'before';
+                            const keepIns = kind === 'after';
+                            return segs.map((s, i) => {
+                              if (s.type === 'eq') return <span key={i}>{s.text}</span>;
+                              if (s.type === 'del' && keepDel) return <span key={i} style={{ background: '#fbe1de', color: '#a8261c', borderRadius: 2 }}>{s.text}</span>;
+                              if (s.type === 'ins' && keepIns) return <span key={i} style={{ background: '#daf3df', color: '#0e6b27', borderRadius: 2 }}>{s.text}</span>;
+                              return null;
+                            });
+                          };
+                          return (
+                            <div key={f} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', borderTop: '1px solid #eaeaef', padding: '8px 10px', fontSize: 12, alignItems: 'start' }}>
+                              <div style={{ fontFamily: 'monospace', color: '#4a4a6a', wordBreak: 'break-all' }}>{f}</div>
+                              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#4a4a6a' }}>{renderSide('before')}</div>
+                              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#4a4a6a' }}>{renderSide('after')}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}

@@ -100,7 +100,11 @@
     },
     "changedFields": {
       "type": "json",
-      "description": "List of top-level field names that actually changed"
+      "description": "List of leaf-path field names that actually changed"
+    },
+    "changedValues": {
+      "type": "json",
+      "description": "Map of changedField path -> { before, after } scalar/summary values"
     }
   }
 }

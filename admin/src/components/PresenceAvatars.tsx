@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 // @ts-ignore
 import { useParams, useLocation } from 'react-router-dom';
+// @ts-ignore
+import { useAuth } from '@strapi/strapi/admin';
 
 const avatarColors = [
     '#4945ff', '#32d08d', '#ff5d5d', '#ffb54d',
@@ -80,62 +82,28 @@ const PresenceAvatars = () => {
         };
     }, []);
 
-    // Fetch current admin user (once)
+    // Read current admin user from AuthProvider (single source of truth in admin)
+    const authUser = useAuth('PresenceAvatars', (state: any) => state.user);
+
     useEffect(() => {
-        const getCookie = (name: string) => {
-            const value = `; ${document.cookie}`;
-            const parts = value.split(`; ${name}=`);
-            if (parts.length === 2) return parts.pop()?.split(';').shift();
-            return null;
-        };
+        if (!authUser) return;
 
-        const getDisplayName = (data: Record<string, unknown> | null): string => {
-            if (!data) return 'Admin';
-            const first = (data.firstname as string) || '';
-            const last = (data.lastname as string) || '';
-            const name = (first + (last ? ` ${last}` : '')).trim();
-            return name || (data.username as string) || (data.email as string) || 'Admin';
-        };
+        const first = (authUser.firstname as string) || '';
+        const last = (authUser.lastname as string) || '';
+        const fullName = (first + (last ? ` ${last}` : '')).trim();
+        const displayName = fullName || (authUser.username as string) || (authUser.email as string) || 'Admin';
 
-        const getInitials = (data: Record<string, unknown> | null): string => {
-            if (!data) return 'A';
-            const first = (data.firstname as string) || '';
-            const last = (data.lastname as string) || '';
-            if (first) return (first[0] + (last ? last[0] : '')).toUpperCase().slice(0, 2);
-            const u = (data.username as string) || (data.email as string) || '';
-            return (u[0] || 'A').toUpperCase();
-        };
+        const initials = first
+            ? (first[0] + (last ? last[0] : '')).toUpperCase().slice(0, 2)
+            : (((authUser.username as string) || (authUser.email as string) || 'A')[0] || 'A').toUpperCase();
 
-        const fetchMe = async () => {
-            try {
-                const basePath = getStrapiBasePath();
-                const token = getCookie('jwtToken') || getCookie('token') || localStorage.getItem('jwtToken') || localStorage.getItem('token');
-                const response = await fetch(`${window.location.origin}${basePath}/admin/users/me`, {
-                    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-                    credentials: 'include',
-                });
-                const resData = await response.json().catch(() => ({}));
-                const data = (resData?.data ?? resData) as Record<string, unknown> | null;
-
-                if (response.ok && data?.id) {
-                    setCurrentUser({
-                        id: (data.id as number) || Math.random(),
-                        username: getDisplayName(data),
-                        initials: getInitials(data)
-                    });
-                } else {
-                    setCurrentUser({
-                        id: 'anon-' + Math.random().toString(36).substring(2, 7),
-                        username: 'Unknown',
-                        initials: '?'
-                    });
-                }
-            } catch (err) {
-                console.warn('[Presence] Failed to fetch user', err);
-            }
-        };
-        fetchMe();
-    }, []);
+        setCurrentUser({
+            id: (authUser.id as number | string) ?? ('anon-' + Math.random().toString(36).substring(2, 7)),
+            username: displayName,
+            email: (authUser.email as string) || null,
+            initials,
+        });
+    }, [authUser]);
 
     // Create WebSocket connection once when currentUser is ready
     useEffect(() => {
