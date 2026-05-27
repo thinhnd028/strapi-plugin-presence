@@ -7,7 +7,7 @@ import {
 } from '@strapi/design-system';
 import { ArrowClockwise, Eye, Filter, Cross, Search } from '@strapi/icons';
 // @ts-ignore
-import { Page, useFetchClient } from '@strapi/strapi/admin';
+import { Page } from '@strapi/strapi/admin';
 
 import DetailModal from '../components/DetailModal';
 import { pluginPermissions } from '../permissions';
@@ -114,7 +114,6 @@ function buildSearchString(params: {
 const ActionHistoryPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { get } = useFetchClient();
   const [data, setData] = useState<Record<string, unknown>[]>([]);
   const [activeUsersCount, setActiveUsersCount] = useState<number | null>(null);
   const [activeUsers, setActiveUsers] = useState<Array<{
@@ -212,40 +211,63 @@ const ActionHistoryPage = () => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Fetch active users (yêu cầu permission plugin::presence.access-active-users)
-  // Dùng useFetchClient của Strapi để admin SDK tự gắn access-token (Strapi 5 không lưu token ở storage)
+  // Active users: dùng WebSocket /ws/presence – server push khi join/leave, không poll HTTP.
   useEffect(() => {
     let cancelled = false;
-    const fetchActiveUsers = async () => {
-      try {
-        const res = await get<{ uniqueCount?: number; count?: number; users?: typeof activeUsers }>('/presence/active-users');
-        if (!cancelled) {
-          const json = res?.data ?? {};
-          setActiveUsersCount(json.uniqueCount ?? json.count ?? 0);
-          setActiveUsers(Array.isArray(json.users) ? json.users : []);
-          setActiveUsersError(null);
-        }
-      } catch (err: any) {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectCount = 0;
+
+    const connect = () => {
+      if (cancelled) return;
+      const basePath = (() => {
+        const path = window.location.pathname;
+        const adminIndex = path.indexOf('/admin');
+        return adminIndex > 0 ? path.substring(0, adminIndex) : '';
+      })();
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${window.location.host}${basePath}/ws/presence`);
+
+      ws.onopen = () => {
+        if (cancelled) { ws?.close(); return; }
+        reconnectCount = 0;
+        setActiveUsersError(null);
+        ws?.send(JSON.stringify({ type: 'subscribe-global-users' }));
+      };
+
+      ws.onmessage = (event: MessageEvent) => {
         if (cancelled) return;
-        const status = err?.response?.status;
-        if (status === 403) {
-          setActiveUsersError('You need permission "Presence: View active users count" to see online users.');
-        } else if (status === 401) {
-          setActiveUsersError('Session expired – please re-login.');
+        try {
+          const msg = JSON.parse(event.data as string);
+          if (msg.type === 'global-users-update') {
+            setActiveUsersCount(msg.uniqueCount ?? msg.count ?? 0);
+            setActiveUsers(Array.isArray(msg.users) ? msg.users : []);
+          }
+        } catch {}
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        if (reconnectCount < 10) {
+          const delay = Math.min(1000 * Math.pow(1.5, reconnectCount), 5000);
+          reconnectCount++;
+          reconnectTimer = setTimeout(connect, delay);
         } else {
-          setActiveUsersError(`Could not load online users (${status ?? 'network error'}).`);
+          setActiveUsersError('Could not connect to presence service.');
         }
-        setActiveUsersCount(0);
-        setActiveUsers([]);
-      }
+      };
+
+      ws.onerror = () => {};
     };
-    fetchActiveUsers();
-    const interval = setInterval(fetchActiveUsers, 15000);
+
+    connect();
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      try { ws?.send(JSON.stringify({ type: 'unsubscribe-global-users' })); } catch {}
+      try { ws?.close(); } catch {}
     };
-  }, [get]);
+  }, []);
 
   // Mở sẵn input search nếu URL đã có search value (khi reload/share link)
   useEffect(() => {
@@ -323,7 +345,7 @@ const ActionHistoryPage = () => {
               <Flex justifyContent="space-between" alignItems="center" paddingBottom={3}>
                 <Typography variant="delta" fontWeight="bold">Who's online</Typography>
                 <Typography variant="pi" textColor="neutral600">
-                  Refreshes every 15s
+                  Live · WebSocket
                 </Typography>
               </Flex>
               {activeUsersError ? (

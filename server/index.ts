@@ -85,8 +85,44 @@ export default {
       const rooms = new Map<string, Set<WebSocket>>();
       // entryId → Map<WebSocket, { userId, username }>
       const typingUsers = new Map<string, Map<WebSocket, { userId: string; username: string }>>();
+      // Sockets đăng ký nhận global active-users update (Action History page)
+      const globalSubscribers = new Set<WebSocket>();
       const socketLiveness = new WeakMap<WebSocket, boolean>();
       let socketCounter = 0;
+
+      /** Tính snapshot global users (gộp theo userId – 1 user nhiều tab) và broadcast cho subscribers. */
+      const computeGlobalUsersPayload = () => {
+        const all = Array.from(activeUsers.values());
+        const byUser = new Map<string, any>();
+        for (const u of all) {
+          const key = String(u?.id ?? u?.socketId ?? '');
+          if (!key) continue;
+          const existing = byUser.get(key);
+          if (existing) {
+            if (u?.entryId && !existing.entries.includes(u.entryId)) existing.entries.push(u.entryId);
+            existing.tabCount += 1;
+          } else {
+            byUser.set(key, {
+              id: u?.id ?? null,
+              username: u?.username ?? null,
+              email: u?.email ?? null,
+              initials: u?.initials ?? null,
+              color: u?.color ?? null,
+              entries: u?.entryId ? [u.entryId] : [],
+              tabCount: 1,
+            });
+          }
+        }
+        return { type: 'global-users-update', count: all.length, uniqueCount: byUser.size, users: Array.from(byUser.values()) };
+      };
+
+      const broadcastGlobalUsers = () => {
+        if (globalSubscribers.size === 0) return;
+        const msg = JSON.stringify(computeGlobalUsersPayload());
+        for (const ws of globalSubscribers) {
+          if (ws.readyState === 1 /* OPEN */) ws.send(msg);
+        }
+      };
 
       const cleanupSocket = (ws: WebSocket) => {
         const state = socketState.get(ws);
@@ -105,7 +141,9 @@ export default {
           }
         }
 
+        globalSubscribers.delete(ws);
         socketLiveness.delete(ws);
+        broadcastGlobalUsers();
       };
 
       const HEARTBEAT_INTERVAL_MS = 30000;
@@ -204,6 +242,7 @@ export default {
               activeUsers.set(socketId, userWithMeta);
               joinRoom(ws, entryId);
               broadcastRoom(entryId);
+              broadcastGlobalUsers();
 
             } else if (msg.type === 'leave-entry') {
               const { entryId } = msg;
@@ -215,7 +254,16 @@ export default {
                 if (tSet) { tSet.delete(ws); broadcastTyping(entryId); }
                 socketState.delete(ws);
                 broadcastRoom(entryId);
+                broadcastGlobalUsers();
               }
+
+            } else if (msg.type === 'subscribe-global-users') {
+              globalSubscribers.add(ws);
+              // Push snapshot ngay cho client mới subscribe
+              try { ws.send(JSON.stringify(computeGlobalUsersPayload())); } catch {}
+
+            } else if (msg.type === 'unsubscribe-global-users') {
+              globalSubscribers.delete(ws);
 
             } else if (msg.type === 'user-typing') {
               const { entryId, userId, username } = msg;
